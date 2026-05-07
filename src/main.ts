@@ -400,6 +400,14 @@ audioEl.crossOrigin = 'anonymous';
 let bpmAnalyzer: BpmAnalyzer | null = null;
 let bpmAnalyzerPromise: Promise<BpmAnalyzer> | null = null;
 let bpmFilter: BiquadFilterNode | null = null;
+let bpmGain: GainNode | null = null;
+// Per-source gain into the BPM analyzer. Mic input is typically -20 to -30 dBFS
+// (samples ~0.05-0.2) while the analyzer's peak detection only descends to a
+// threshold of 0.2 — quiet mic audio never produces qualifying peaks. Boosting
+// mic input ~4× brings it into the working range. File sources are usually
+// near full-scale and use unity gain.
+const BPM_GAIN_FILE = 1.0;
+const BPM_GAIN_MIC = 4.0;
 let bpm = 0;          // locked BPM (0 until first stable estimate)
 let bpmCandidate = 0; // most recent top candidate (early-feedback display)
 let bassEnergy = 0;   // mean of low-band FFT bins (drives bloom pulse)
@@ -423,9 +431,13 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
   if (bpmAnalyzer) return bpmAnalyzer;
   if (bpmAnalyzerPromise) return bpmAnalyzerPromise;
   const { ctx } = ensureAudio();
+  // Gain stage — set per-source by connectBpmSource (1× for files, 4× for mic).
+  bpmGain = ctx.createGain();
+  bpmGain.gain.value = BPM_GAIN_FILE;
   // 200 Hz lowpass, Q=1 — focus the analyzer on kick/bass transients, ignore
   // hi-hats/cymbals/vocals that confuse peak detection.
   bpmFilter = getBiquadFilter(ctx);
+  bpmGain.connect(bpmFilter);
   // continuousAnalysis: false — lock once and hold. Stops the readout from
   // wobbling on tracks where the analyzer's confidence drifts. Source change
   // calls bpmAnalyzer.reset() to re-analyze.
@@ -449,9 +461,9 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
     });
 
     bpmAnalyzer = a;
-    // expose for ad-hoc DevTools poking + filter tuning
+    // expose for ad-hoc DevTools poking + filter/gain tuning
     (window as unknown as { __terrain?: unknown }).__terrain = {
-      ctx, analyser, fftBins, bpmAnalyzer: a, bpmFilter,
+      ctx, analyser, fftBins, bpmAnalyzer: a, bpmFilter, bpmGain,
       get bpm() { return bpm; },
       get bpmCandidate() { return bpmCandidate; },
       get bassEnergy() { return bassEnergy; },
@@ -461,6 +473,10 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
           bpmFilter.frequency.value = freq;
           bpmFilter.Q.value = q;
         }
+      },
+      // boost/cut the BPM chain input: __terrain.setGain(8) for very quiet mic
+      setGain(g: number) {
+        if (bpmGain) bpmGain.gain.value = g;
       },
       resetBpm() { bpm = 0; bpmCandidate = 0; a.reset(); },
     };
@@ -472,14 +488,15 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
   return bpmAnalyzerPromise;
 }
 
-function connectBpmSource(src: AudioNode) {
+function connectBpmSource(src: AudioNode, gain: number) {
   ensureBpm().then((a) => {
-    if (!a || !bpmFilter) return;
-    // disconnect previous source from the filter input
+    if (!a || !bpmGain) return;
+    // disconnect previous source from the gain input
     if (lastBpmSourceNode) {
-      try { lastBpmSourceNode.disconnect(bpmFilter); } catch {}
+      try { lastBpmSourceNode.disconnect(bpmGain); } catch {}
     }
-    src.connect(bpmFilter);
+    bpmGain.gain.value = gain;
+    src.connect(bpmGain);
     lastBpmSourceNode = src;
     // fresh source — clear any prior lock and reset the analyzer's internal
     // peak buffer so the new audio gets analyzed from scratch.
@@ -525,7 +542,7 @@ fileInput.addEventListener('change', () => {
   }
   mediaSrc.connect(analyser);
   analyser.connect(ctx.destination);
-  connectBpmSource(mediaSrc);
+  connectBpmSource(mediaSrc, BPM_GAIN_FILE);
   currentSourceNode = mediaSrc;
   playBtn.disabled = false;
   playBtn.textContent = 'play';
@@ -560,7 +577,7 @@ micBtn.addEventListener('click', async () => {
     const src = ctx.createMediaStreamSource(micStream);
     src.connect(analyser);
     // do NOT connect mic → destination (feedback)
-    connectBpmSource(src);
+    connectBpmSource(src, BPM_GAIN_MIC);
     currentSourceNode = src;
     playBtn.disabled = true;
     statusEl.textContent = 'mic live';
