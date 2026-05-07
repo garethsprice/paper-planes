@@ -4,6 +4,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { createNoise3D } from 'simplex-noise';
+import { createRealtimeBpmAnalyzer, type BpmAnalyzer } from 'realtime-bpm-analyzer';
 
 // ----- grid params -----
 const COLS = 129; // freq axis (PlaneGeometry(_, _, 128, 128) → 129 verts)
@@ -19,6 +20,7 @@ const fileInput = document.getElementById('file') as HTMLInputElement;
 const playBtn = document.getElementById('play') as HTMLButtonElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
+const bpmEl = document.getElementById('bpm') as HTMLSpanElement;
 
 // ----- three.js core -----
 const scene = new THREE.Scene();
@@ -281,16 +283,13 @@ function wrapAngle(a: number): number {
 function updateShip(dt: number, time: number): void {
   // 1. audio bands
   let level = 0;
-  let bass = 0;
+  // bass is computed once per frame in animate() and stored in bassEnergy.
+  const bass = bassEnergy;
   let centroid = 0.5;
   if (fftBins) {
     let sumAll = 0;
     for (let i = 0; i < fftBins.length; i++) sumAll += fftBins[i];
     level = sumAll / (fftBins.length * 255);
-    let bs = 0;
-    const bMax = Math.min(20, fftBins.length);
-    for (let i = 1; i < bMax; i++) bs += fftBins[i];
-    bass = bs / ((bMax - 1) * 255);
     let cn = 0;
     let cd = 0;
     for (let i = 1; i < fftBins.length; i++) {
@@ -391,6 +390,18 @@ let micStream: MediaStream | null = null;
 const audioEl = new Audio();
 audioEl.crossOrigin = 'anonymous';
 
+// BPM detection — realtime-bpm-analyzer wraps an AudioWorkletNode. We connect
+// the active source to its `.node` as a parallel sink (the existing
+// source→analyser→destination chain still drives audio). Worklet creation is
+// async so we cache both the resolved analyzer and the in-flight promise.
+let bpmAnalyzer: BpmAnalyzer | null = null;
+let bpmAnalyzerPromise: Promise<BpmAnalyzer> | null = null;
+let bpm = 0;          // smoothed locked BPM (0 until first stable estimate)
+let bpmCandidate = 0; // most recent top candidate (early-feedback display)
+let bassEnergy = 0;   // mean of low-band FFT bins (drives bloom pulse)
+let lastBpmSourceNode: AudioNode | null = null; // tracked separately so we
+// can disconnect it from bpmAnalyzer.node without touching the analyser path.
+
 function ensureAudio(): { ctx: AudioContext; analyser: AnalyserNode } {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext ||
@@ -404,11 +415,49 @@ function ensureAudio(): { ctx: AudioContext; analyser: AnalyserNode } {
   return { ctx: audioCtx, analyser: analyser! };
 }
 
+async function ensureBpm(): Promise<BpmAnalyzer | null> {
+  if (bpmAnalyzer) return bpmAnalyzer;
+  if (bpmAnalyzerPromise) return bpmAnalyzerPromise;
+  const { ctx } = ensureAudio();
+  bpmAnalyzerPromise = createRealtimeBpmAnalyzer(ctx).then((a) => {
+    a.on('bpm', (data) => {
+      const top = data.bpm[0];
+      if (top) bpmCandidate = top.tempo;
+    });
+    a.on('bpmStable', (data) => {
+      const top = data.bpm[0];
+      if (top) bpm += (top.tempo - bpm) * 0.5;
+    });
+    bpmAnalyzer = a;
+    return a;
+  }).catch((err) => {
+    console.warn('BPM analyzer unavailable:', err);
+    return null as unknown as BpmAnalyzer;
+  });
+  return bpmAnalyzerPromise;
+}
+
+function connectBpmSource(src: AudioNode) {
+  ensureBpm().then((a) => {
+    if (!a) return;
+    // disconnect previous parallel sink to avoid double-counting
+    if (lastBpmSourceNode) {
+      try { lastBpmSourceNode.disconnect(a.node); } catch {}
+    }
+    src.connect(a.node);
+    lastBpmSourceNode = src;
+  });
+}
+
 function disconnectCurrent() {
   if (currentSourceNode) {
     try { currentSourceNode.disconnect(); } catch {}
     currentSourceNode = null;
   }
+  // currentSourceNode.disconnect() above already severs the bpm-sink link
+  // since it's a no-arg disconnect — clear the cached ref so the next
+  // connectBpmSource doesn't try to undo a connection that's already gone.
+  lastBpmSourceNode = null;
   if (micStream) {
     micStream.getTracks().forEach((t) => t.stop());
     micStream = null;
@@ -436,6 +485,7 @@ fileInput.addEventListener('change', () => {
   }
   mediaSrc.connect(analyser);
   analyser.connect(ctx.destination);
+  connectBpmSource(mediaSrc);
   currentSourceNode = mediaSrc;
   playBtn.disabled = false;
   playBtn.textContent = 'play';
@@ -470,6 +520,7 @@ micBtn.addEventListener('click', async () => {
     const src = ctx.createMediaStreamSource(micStream);
     src.connect(analyser);
     // do NOT connect mic → destination (feedback)
+    connectBpmSource(src);
     currentSourceNode = src;
     playBtn.disabled = true;
     statusEl.textContent = 'mic live';
@@ -551,6 +602,11 @@ function animate() {
   // write new front row
   if (analyser && fftBins) {
     analyser.getByteFrequencyData(fftBins);
+    // bass band (bins 1..19, ~40-800Hz) → drives bloom pulse + ship thrust
+    let bs = 0;
+    const bMax = Math.min(20, fftBins.length);
+    for (let i = 1; i < bMax; i++) bs += fftBins[i];
+    bassEnergy = bs / ((bMax - 1) * 255);
     const baseIdx = ROW_STRIDE_FRONT;
     for (let ix = 0; ix < COLS; ix++) {
       const amp = sampleLogBin(fftBins, binMap[ix]) / 255; // 0..1
@@ -561,6 +617,7 @@ function animate() {
       heights[baseIdx + ix] = shaped * HEIGHT_SCALE + n;
     }
   } else {
+    bassEnergy = 0;
     // idle look — gently undulating noise field
     const baseIdx = ROW_STRIDE_FRONT;
     for (let ix = 0; ix < COLS; ix++) {
@@ -594,6 +651,16 @@ function animate() {
   camera.position.z = Math.cos(yaw) * radius;
   camera.position.y = baseHeight + pitch * 12;
   camera.lookAt(0, 1.5, 0);
+
+  // beat pulse: subtle bloom kick on bass transients (decoupled from BPM lock)
+  bloom.strength = 0.65 + bassEnergy * 0.5;
+
+  // BPM readout: prefer locked-in stable value; fall back to candidate
+  bpmEl.textContent = bpm > 0
+    ? `${Math.round(bpm)} bpm`
+    : bpmCandidate > 0
+      ? `~${Math.round(bpmCandidate)} bpm`
+      : '— bpm';
 
   composer.render(dt);
 }
