@@ -408,7 +408,7 @@ type Ship = {
   trailGeometry: THREE.BufferGeometry;
   trailPosAttr: THREE.BufferAttribute;
 };
-const TRAIL_LEN = 60;
+const TRAIL_LEN = 45;
 
 function makeShip(seed: number, x0: number, z0: number): Ship {
   const group = new THREE.Group();
@@ -428,11 +428,11 @@ function makeShip(seed: number, x0: number, z0: number): Ship {
   const trailColors = new Float32Array(TRAIL_LEN * 3);
   for (let i = 0; i < TRAIL_LEN; i++) {
     const t = i / (TRAIL_LEN - 1); // 0 = tail, 1 = head
-    // brightness ramps from 0 (tail) to ~1 (head). Additive blending makes
-    // the bright head pop and the dim tail invisible against the dark sky.
-    trailColors[i * 3] = t * 0.8;
-    trailColors[i * 3 + 1] = t * 0.95;
-    trailColors[i * 3 + 2] = t * 1.0;
+    // Subtle ramp — bright enough to read against the dark sky, not bright
+    // enough to compete with the ship body or terrain peaks.
+    trailColors[i * 3]     = t * 0.30;
+    trailColors[i * 3 + 1] = t * 0.40;
+    trailColors[i * 3 + 2] = t * 0.45;
   }
   const trailGeometry = new THREE.BufferGeometry();
   const trailPosAttr = new THREE.BufferAttribute(trailPositions, 3);
@@ -554,13 +554,16 @@ function updateShip(ship: Ship, dt: number, time: number, level: number, centroi
   ship.pitch += (targetPitch - ship.pitch) * orientLerp;
   ship.group.rotation.set(ship.pitch, ship.heading, ship.roll);
 
-  // 7. trail — shift positions back one slot, write current pos at the tail
+  // 7. trail — emit from the keel-tail behind the ship (not the centroid),
+  // so the ship body itself stays in focus and the streak only appears once
+  // it leaves the craft. Backward = -forward; the keel-tail sits ~0.5 units
+  // behind the rotation pivot and 0.7 below it (matches the ship geometry).
   const tp = ship.trailPositions;
-  tp.copyWithin(0, 3, TRAIL_LEN * 3); // slot[i+1] → slot[i], tail still has old data
+  tp.copyWithin(0, 3, TRAIL_LEN * 3);
   const tail = (TRAIL_LEN - 1) * 3;
-  tp[tail] = pos.x;
-  tp[tail + 1] = pos.y - 0.2; // anchor trail slightly below ship belly
-  tp[tail + 2] = pos.z;
+  tp[tail]     = pos.x - fwdX * 0.5;
+  tp[tail + 1] = pos.y - 0.7;
+  tp[tail + 2] = pos.z - fwdZ * 0.5;
   ship.trailPosAttr.needsUpdate = true;
 }
 
