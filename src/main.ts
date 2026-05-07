@@ -846,18 +846,30 @@ canvas.addEventListener('click', () => {
   micBtn.click();
 });
 
-// ----- cinematic auto-cam — cycles between presets on bar boundaries -----
+// ----- camera modes — auto-cycles every 8 beats, 'C' jumps to next now -----
 type CamPreset = { yaw: number; pitch: number; radius: number; height: number };
+type CamMode =
+  | { kind: 'preset'; preset: CamPreset; label: string }
+  | { kind: 'chase'; shipIdx: number; label: string }
+  | { kind: 'cockpit'; shipIdx: number; label: string };
+
 const CAM_PRESETS: CamPreset[] = [
-  { yaw: 0,         pitch: 0.0,  radius: 28, height: 9  }, // default eye-level
-  { yaw: 0.6,       pitch: 0.25, radius: 32, height: 14 }, // 3/4 high-side
-  { yaw: -0.5,      pitch: -0.1, radius: 22, height: 6  }, // low chase from left
-  { yaw: Math.PI,   pitch: 0.35, radius: 36, height: 18 }, // overhead reverse
+  { yaw: 0,        pitch: 0.0,  radius: 28, height: 9  }, // eye-level
+  { yaw: 0.6,      pitch: 0.25, radius: 32, height: 14 }, // 3/4 high-side
+  { yaw: -0.5,     pitch: -0.1, radius: 22, height: 6  }, // low-left
+  { yaw: Math.PI,  pitch: 0.35, radius: 36, height: 18 }, // overhead reverse
 ];
-let cinematicMode = false;
-let cinematicPresetIdx = 0;
-let cinematicPresetAt = 0;          // ms timestamp of last preset switch
-let cinematicBeatsAtSwitch = 0;     // beatCount snapshot at last switch
+
+// 4 cinematic presets, then chase + cockpit per ship. 'C' cycles, auto-advance
+// every 8 beats (or 8 s if BPM hasn't locked).
+const CAM_MODES: CamMode[] = [
+  ...CAM_PRESETS.map((preset, i): CamMode => ({ kind: 'preset', preset, label: `preset ${i + 1}` })),
+  ...ships.map((_, i): CamMode => ({ kind: 'chase', shipIdx: i, label: `chase ship ${i + 1}` })),
+  ...ships.map((_, i): CamMode => ({ kind: 'cockpit', shipIdx: i, label: `cockpit ship ${i + 1}` })),
+];
+let currentCamModeIdx = 0;
+let camModeChangedAt = 0;       // ms timestamp of last cam switch
+let camBeatsAtChange = 0;       // beatCount snapshot at last cam switch
 let beatCount = 0;
 
 // ----- keyboard shortcuts -----
@@ -890,12 +902,10 @@ document.addEventListener('keydown', (e) => {
       statusEl.textContent = `nebula ${nebula.visible ? 'on' : 'off'}`;
       break;
     case 'c':
-      cinematicMode = !cinematicMode;
-      // start the timer/beat-window from "now" so the first switch happens
-      // beatsPerSwitch beats after the toggle, not immediately.
-      cinematicPresetAt = performance.now();
-      cinematicBeatsAtSwitch = beatCount;
-      statusEl.textContent = `cinematic ${cinematicMode ? 'on' : 'off'}`;
+      currentCamModeIdx = (currentCamModeIdx + 1) % CAM_MODES.length;
+      camModeChangedAt = performance.now();
+      camBeatsAtChange = beatCount;
+      statusEl.textContent = `cam: ${CAM_MODES[currentCamModeIdx].label}`;
       break;
   }
 });
@@ -978,44 +988,71 @@ function animate() {
   }
   for (const ship of ships) updateShip(ship, dt, t, level, centroid);
 
-  // cinematic mode advances the active preset every 8 beats (≈two bars at 4/4)
-  // when BPM is locked, or every 8 seconds otherwise. Track beats-since-last-
-  // switch (NOT absolute beatCount × idx — idx wraps mod CAM_PRESETS.length so
-  // that comparison would pass every frame after the first wrap → jitter).
-  if (cinematicMode) {
+  // auto-advance camera mode every 8 beats (BPM-locked) or 8 s fallback.
+  // (beats-since-switch comparison; absolute beatCount × idx wraps and jitters.)
+  {
     const beatsPerSwitch = 8;
     const fallbackMs = 8000;
     const ready = bpm > 0
-      ? beatCount - cinematicBeatsAtSwitch >= beatsPerSwitch
-      : performance.now() - cinematicPresetAt >= fallbackMs;
+      ? beatCount - camBeatsAtChange >= beatsPerSwitch
+      : performance.now() - camModeChangedAt >= fallbackMs;
     if (ready) {
-      cinematicPresetIdx = (cinematicPresetIdx + 1) % CAM_PRESETS.length;
-      cinematicPresetAt = performance.now();
-      cinematicBeatsAtSwitch = beatCount;
+      currentCamModeIdx = (currentCamModeIdx + 1) % CAM_MODES.length;
+      camModeChangedAt = performance.now();
+      camBeatsAtChange = beatCount;
     }
-    const p = CAM_PRESETS[cinematicPresetIdx];
-    targetYaw = p.yaw;
-    targetPitch = p.pitch;
   }
 
-  // spring orbit: critically-underdamped, with a kick on bass attacks so the
-  // camera breathes with the music instead of just snapping to targets.
-  const bassDelta = bassEnergy - prevBassForSpring;
-  prevBassForSpring = bassEnergy;
-  if (bassDelta > 0.05) yawVel += bassDelta * CAM_BASS_IMPULSE;
-  const yawAccel = (targetYaw - yaw) * CAM_STIFFNESS - yawVel * CAM_DAMPING;
-  yawVel += yawAccel * dt;
-  yaw += yawVel * dt;
-  const pitchAccel = (targetPitch - pitch) * CAM_STIFFNESS - pitchVel * CAM_DAMPING;
-  pitchVel += pitchAccel * dt;
-  pitch += pitchVel * dt;
-  const presetRadius = cinematicMode ? CAM_PRESETS[cinematicPresetIdx].radius : 28;
-  const presetHeight = cinematicMode ? CAM_PRESETS[cinematicPresetIdx].height : 9;
-  const radius = presetRadius - bassEnergy * 2.5; // pulls in on heavy bass
-  camera.position.x = Math.sin(yaw) * radius;
-  camera.position.z = Math.cos(yaw) * radius;
-  camera.position.y = presetHeight + pitch * 12;
-  camera.lookAt(0, 1.5, 0);
+  // restore visibility every frame; the active cockpit mode hides its own ship.
+  for (const s of ships) s.group.visible = true;
+
+  const camMode = CAM_MODES[currentCamModeIdx];
+  if (camMode.kind === 'preset') {
+    // spring orbit around origin, with bass attack impulse on yaw and bass
+    // amplitude pulling the radius in.
+    const p = camMode.preset;
+    targetYaw = p.yaw;
+    targetPitch = p.pitch;
+    const bassDelta = bassEnergy - prevBassForSpring;
+    prevBassForSpring = bassEnergy;
+    if (bassDelta > 0.05) yawVel += bassDelta * CAM_BASS_IMPULSE;
+    const yawAccel = (targetYaw - yaw) * CAM_STIFFNESS - yawVel * CAM_DAMPING;
+    yawVel += yawAccel * dt;
+    yaw += yawVel * dt;
+    const pitchAccel = (targetPitch - pitch) * CAM_STIFFNESS - pitchVel * CAM_DAMPING;
+    pitchVel += pitchAccel * dt;
+    pitch += pitchVel * dt;
+    const radius = p.radius - bassEnergy * 2.5;
+    camera.position.x = Math.sin(yaw) * radius;
+    camera.position.z = Math.cos(yaw) * radius;
+    camera.position.y = p.height + pitch * 12;
+    camera.lookAt(0, 1.5, 0);
+  } else if (camMode.kind === 'chase') {
+    // 5 units behind the ship, 2.5 above; lerp-smoothed so the camera doesn't
+    // jitter when the ship banks hard. Looking ~3 units ahead so the ship
+    // sits in the lower portion of the frame.
+    const ship = ships[camMode.shipIdx];
+    const sp = ship.group.position;
+    const fwdX = -Math.sin(ship.heading);
+    const fwdZ = -Math.cos(ship.heading);
+    const desiredX = sp.x - fwdX * 5;
+    const desiredY = sp.y + 2.5;
+    const desiredZ = sp.z - fwdZ * 5;
+    const k = 1 - Math.exp(-8 * dt);
+    camera.position.x += (desiredX - camera.position.x) * k;
+    camera.position.y += (desiredY - camera.position.y) * k;
+    camera.position.z += (desiredZ - camera.position.z) * k;
+    camera.lookAt(sp.x + fwdX * 3, sp.y, sp.z + fwdZ * 3);
+  } else {
+    // cockpit: locked to the ship's nose, looking forward; hide own ship.
+    const ship = ships[camMode.shipIdx];
+    ship.group.visible = false;
+    const sp = ship.group.position;
+    const fwdX = -Math.sin(ship.heading);
+    const fwdZ = -Math.cos(ship.heading);
+    camera.position.set(sp.x + fwdX * 0.3, sp.y + 0.05, sp.z + fwdZ * 0.3);
+    camera.lookAt(sp.x + fwdX * 12, sp.y + 0.05, sp.z + fwdZ * 12);
+  }
 
   // beat pulse breathes the whole landscape vertically
   uniforms.uHeightMul.value = 1.0 + beatPulse * 0.10;
