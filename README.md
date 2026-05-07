@@ -6,7 +6,7 @@ Drop in an audio file, share a tab's audio, or use your microphone. The terrain 
 
 ## What this is
 
-These are the pictures I've been seeing in my head whenever I've listened to music since I was a kid — terrain rolling out from the sound, paper planes flying through it, color and shape moving with the beat. This is an attempt to realize them.
+Since I was a kid I've watched something like this in my head whenever I've listened to music: terrain unrolling out of the sound, paper planes carving through valleys, the whole landscape breathing with the kick. Headphones, eyes closed, and there it was. This is my attempt to actually see it from the outside — it's not quite the version in my head, but it's the closest I've gotten.
 
 ## Features
 
