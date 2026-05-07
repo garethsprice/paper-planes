@@ -113,6 +113,8 @@ const uniforms = {
   uFogColor: { value: new THREE.Color(0x000308) },
   uHeightScale: { value: HEIGHT_SCALE },
   uDepthHalf: { value: DEPTH * 0.5 },
+  uHeightMul: { value: 1.0 },  // beat-pulse pumps the whole landscape vertically
+  uHueShift: { value: 0.0 },   // BPM-driven hue rotation in [-0.05, +0.05] turns
 };
 
 const material = new THREE.ShaderMaterial({
@@ -125,12 +127,14 @@ const material = new THREE.ShaderMaterial({
     varying float vViewDist;
     varying float vRowAge;
     uniform float uDepthHalf;
+    uniform float uHeightMul;
 
     void main() {
-      vHeight = position.y;
+      vec3 p = vec3(position.x, position.y * uHeightMul, position.z);
+      vHeight = p.y;
       // rowAge: 0 at front (newest) → 1 at back (oldest)
-      vRowAge = clamp((uDepthHalf - position.z) / (uDepthHalf * 2.0), 0.0, 1.0);
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vRowAge = clamp((uDepthHalf - p.z) / (uDepthHalf * 2.0), 0.0, 1.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
       vViewDist = -mv.z;
       gl_Position = projectionMatrix * mv;
     }
@@ -143,6 +147,7 @@ const material = new THREE.ShaderMaterial({
     uniform float uFogFar;
     uniform vec3 uFogColor;
     uniform float uHeightScale;
+    uniform float uHueShift;
 
     // cool → hot gradient
     vec3 grade(float t) {
@@ -159,12 +164,34 @@ const material = new THREE.ShaderMaterial({
       return mix(c4, c5, (t - 0.88) / 0.12);
     }
 
+    // RGB↔HSV for hue rotation. Standard GLSL snippet, public-domain.
+    vec3 rgb2hsv(vec3 c) {
+      vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+      vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+      vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+      float d = q.x - min(q.w, q.y);
+      float e = 1.0e-10;
+      return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+    }
+    vec3 hsv2rgb(vec3 c) {
+      vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+      vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+      return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+    }
+
     void main() {
       float h = clamp(vHeight / uHeightScale, 0.0, 1.0);
       vec3 col = grade(h);
 
       // subtle brightness boost on peaks → bloom catches them
       col *= 0.8 + 1.6 * h;
+
+      // BPM-driven hue rotation
+      if (abs(uHueShift) > 0.001) {
+        vec3 hsv = rgb2hsv(col);
+        hsv.x = fract(hsv.x + uHueShift);
+        col = hsv2rgb(hsv);
+      }
 
       // fade old rows toward black for depth
       float ageFade = 1.0 - smoothstep(0.55, 1.0, vRowAge);
@@ -330,7 +357,8 @@ function updateShip(dt: number, time: number): void {
   const targetSpeed = SHIP_BASE_SPEED + bass * SHIP_SPEED_BOOST;
   shipState.speed += (targetSpeed - shipState.speed) * SHIP_ACCEL_RATE * dt;
   const effSpeed =
-    shipState.speed * (1 - SHIP_TURN_SLOWDOWN * Math.abs(turnInput));
+    shipState.speed * (1 - SHIP_TURN_SLOWDOWN * Math.abs(turnInput))
+    * (1 + beatPulse * 0.45); // each beat = small thrust kick
 
   // 5. integrate position along forward heading.
   // Forward in world = R_y(heading) * (0,0,-1) = (-sin h, 0, -cos h).
@@ -723,15 +751,21 @@ function animate() {
   // ship autopilot uses freshly-updated heights[] for path/collision
   updateShip(dt, t);
 
-  // damped orbit
+  // damped orbit + bass-driven push-in
   yaw += (targetYaw - yaw) * 0.08;
   pitch += (targetPitch - pitch) * 0.08;
-  const radius = 28;
+  const radius = 28 - bassEnergy * 2.5;        // pulls in on heavy bass
   const baseHeight = 9;
   camera.position.x = Math.sin(yaw) * radius;
   camera.position.z = Math.cos(yaw) * radius;
   camera.position.y = baseHeight + pitch * 12;
   camera.lookAt(0, 1.5, 0);
+
+  // beat pulse breathes the whole landscape vertically
+  uniforms.uHeightMul.value = 1.0 + beatPulse * 0.10;
+  // hue rotates with locked BPM: 60 → -0.05 turns (cooler), 180 → +0.05 turns (warmer)
+  const tempoForHue = bpm > 0 ? bpm : 120;
+  uniforms.uHueShift.value = Math.max(-0.05, Math.min(0.05, (tempoForHue - 120) / 60 * 0.05));
 
   // bloom kick on bass transients (decoupled from BPM lock — reacts to energy)
   bloom.strength = 0.65 + bassEnergy * 0.5;
