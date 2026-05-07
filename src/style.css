@@ -69,7 +69,21 @@ html, body {
   font-size: 11px;
   letter-spacing: 0.05em;
   color: #b0d8ff;
-  font-variant-numeric: tabular-nums;
   min-width: 60px;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+#bpm .num {
+  font-variant-numeric: tabular-nums;
+}
+#bpm .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5dd0ff;
+  box-shadow: 0 0 8px rgba(93, 208, 255, 0.7);
+  opacity: 0.2;
+  /* JS drives opacity per frame — disable transitions to avoid lag/jitter */
+  transition: none;
 }

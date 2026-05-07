@@ -20,7 +20,8 @@ const fileInput = document.getElementById('file') as HTMLInputElement;
 const playBtn = document.getElementById('play') as HTMLButtonElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
-const bpmEl = document.getElementById('bpm') as HTMLSpanElement;
+const bpmNumEl = document.querySelector('#bpm .num') as HTMLSpanElement;
+const bpmDotEl = document.getElementById('bpm-dot') as HTMLSpanElement;
 
 // ----- three.js core -----
 const scene = new THREE.Scene();
@@ -411,6 +412,8 @@ const BPM_GAIN_MIC = 8.0;
 let bpm = 0;          // locked BPM (0 until first stable estimate)
 let bpmCandidate = 0; // most recent top candidate (early-feedback display)
 let bassEnergy = 0;   // mean of low-band FFT bins (drives bloom pulse)
+let beatPulse = 0;    // 0..1, set to 1 on each validPeak event, decays per frame
+let lastPeakAt = 0;   // ms timestamp of last triggered peak (refractory gate)
 let lastBpmSourceNode: AudioNode | null = null; // tracked separately so we
 // can disconnect it from bpmFilter without touching the analyser path.
 
@@ -441,7 +444,8 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
   // continuousAnalysis: false — lock once and hold. Stops the readout from
   // wobbling on tracks where the analyzer's confidence drifts. Source change
   // calls bpmAnalyzer.reset() to re-analyze.
-  bpmAnalyzerPromise = createRealtimeBpmAnalyzer(ctx, { continuousAnalysis: false }).then((a) => {
+  // debug: true so the worklet emits 'validPeak' events for the dot indicator.
+  bpmAnalyzerPromise = createRealtimeBpmAnalyzer(ctx, { continuousAnalysis: false, debug: true }).then((a) => {
     bpmFilter!.connect(a.node);
     // Connect the worklet's output to destination so Chrome doesn't prune it
     // from the graph. The processor doesn't write outputs (process() only
@@ -458,6 +462,16 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
     });
     a.on('error', (e) => {
       console.error('[bpm] analyzer error:', e);
+    });
+    a.on('validPeak', () => {
+      // The analyzer descends through thresholds (0.95 → 0.2) and may emit
+      // multiple validPeak events for one audio peak — gate to 250 ms
+      // (240 BPM ceiling) so the dot flashes once per beat.
+      const now = performance.now();
+      if (now - lastPeakAt > 250) {
+        beatPulse = 1.0;
+        lastPeakAt = now;
+      }
     });
 
     bpmAnalyzer = a;
@@ -719,11 +733,15 @@ function animate() {
   camera.position.y = baseHeight + pitch * 12;
   camera.lookAt(0, 1.5, 0);
 
-  // beat pulse: subtle bloom kick on bass transients (decoupled from BPM lock)
+  // bloom kick on bass transients (decoupled from BPM lock — reacts to energy)
   bloom.strength = 0.65 + bassEnergy * 0.5;
 
+  // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
+  beatPulse *= Math.exp(-9 * dt); // visible for ~150ms after each peak
+  bpmDotEl.style.opacity = String(0.2 + beatPulse * 0.8);
+
   // BPM readout: prefer locked-in stable value; fall back to candidate
-  bpmEl.textContent = bpm > 0
+  bpmNumEl.textContent = bpm > 0
     ? `${Math.round(bpm)} bpm`
     : bpmCandidate > 0
       ? `~${Math.round(bpmCandidate)} bpm`
