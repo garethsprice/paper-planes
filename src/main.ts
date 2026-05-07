@@ -419,19 +419,38 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
   if (bpmAnalyzer) return bpmAnalyzer;
   if (bpmAnalyzerPromise) return bpmAnalyzerPromise;
   const { ctx } = ensureAudio();
-  bpmAnalyzerPromise = createRealtimeBpmAnalyzer(ctx).then((a) => {
+  // continuousAnalysis: keep updating after the first stable lock so the
+  // readout keeps moving when tempo changes mid-track.
+  bpmAnalyzerPromise = createRealtimeBpmAnalyzer(ctx, { continuousAnalysis: true }).then((a) => {
     a.on('bpm', (data) => {
       const top = data.bpm[0];
       if (top) bpmCandidate = top.tempo;
     });
     a.on('bpmStable', (data) => {
       const top = data.bpm[0];
-      if (top) bpm += (top.tempo - bpm) * 0.5;
+      if (!top) return;
+      // First stable lock: snap directly. Subsequent stables: gentle smoothing
+      // to avoid jumps when the analyzer briefly disagrees with itself.
+      bpm = bpm === 0 ? top.tempo : bpm + (top.tempo - bpm) * 0.5;
     });
+    a.on('error', (e) => {
+      console.error('[bpm] analyzer error:', e);
+    });
+    // Connect the worklet's output to destination so Chrome doesn't prune it
+    // from the graph. The processor doesn't write outputs (process() only
+    // reads inputs), so the AudioWorkletNode emits zero samples — silent.
+    a.node.connect(ctx.destination);
     bpmAnalyzer = a;
+    // expose for ad-hoc DevTools poking
+    (window as unknown as { __terrain?: unknown }).__terrain = {
+      ctx, analyser, fftBins, bpmAnalyzer: a,
+      get bpm() { return bpm; },
+      get bpmCandidate() { return bpmCandidate; },
+      get bassEnergy() { return bassEnergy; },
+    };
     return a;
   }).catch((err) => {
-    console.warn('BPM analyzer unavailable:', err);
+    console.warn('[bpm] analyzer unavailable:', err);
     return null as unknown as BpmAnalyzer;
   });
   return bpmAnalyzerPromise;
