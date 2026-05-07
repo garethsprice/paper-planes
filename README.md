@@ -4,6 +4,10 @@ An audio-reactive 3D spectrogram visualizer with autonomous paper-airplane ships
 
 Drop in an audio file, share a tab's audio, or use your microphone. The terrain is a scrolling waterfall FFT, the ships are autopiloted wedges that bank through valleys and over peaks in time with the music, and the camera cycles through cinematic views on bar boundaries when the BPM is locked.
 
+## What this is
+
+These are the pictures I've been seeing in my head whenever I've listened to music since I was a kid — terrain rolling out from the sound, paper planes flying through it, color and shape moving with the beat. This is an attempt to realize them.
+
 ## Features
 
 - **Live spectrogram** — `AnalyserNode` (`fftSize: 1024`, `smoothing: 0.8`) drives a 129×129 wireframe grid scrolling in -Z.
