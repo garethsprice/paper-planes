@@ -3,7 +3,6 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { AfterimagePass } from 'three/examples/jsm/postprocessing/AfterimagePass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { createNoise3D } from 'simplex-noise';
 import { createRealtimeBpmAnalyzer, getBiquadFilter, type BpmAnalyzer } from 'realtime-bpm-analyzer';
@@ -72,12 +71,6 @@ const bloom = new UnrealBloomPass(
   0.05, // threshold
 );
 composer.addPass(bloom);
-
-// Afterimage (feedback motion blur): subtle fading ghost behind bright pixels.
-// damp closer to 1 = longer/brighter trails. Kept low so the effect is felt
-// rather than seen — bumps slightly on bass.
-const afterimagePass = new AfterimagePass(0.82);
-composer.addPass(afterimagePass);
 
 // Chromatic aberration: subtle radial RGB split, expands on bass.
 const ChromaticAberrationShader = {
@@ -1050,8 +1043,7 @@ function animate() {
 
   // bloom kick on bass transients (decoupled from BPM lock — reacts to energy)
   bloom.strength = 0.65 + bassEnergy * 0.5;
-  // afterimage damp + chromatic aberration both pulse with bass
-  afterimagePass.uniforms.damp.value = 0.82 + bassEnergy * 0.04;
+  // chromatic aberration pulses with bass
   chromaticPass.uniforms.uAmount.value = Math.min(0.008, 0.0015 + bassEnergy * 0.006);
 
   // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
