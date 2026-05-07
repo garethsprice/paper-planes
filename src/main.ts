@@ -19,6 +19,8 @@ const canvas = document.getElementById('stage') as HTMLCanvasElement;
 const fileInput = document.getElementById('file') as HTMLInputElement;
 const playBtn = document.getElementById('play') as HTMLButtonElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
+const tabBtn = document.getElementById('tab') as HTMLButtonElement;
+const uiEl = document.getElementById('ui') as HTMLDivElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
 const bpmNumEl = document.querySelector('#bpm .num') as HTMLSpanElement;
 const bpmDotEl = document.getElementById('bpm-dot') as HTMLSpanElement;
@@ -564,9 +566,7 @@ function disconnectCurrent() {
 }
 
 let currentObjectUrl: string | null = null;
-fileInput.addEventListener('change', () => {
-  const f = fileInput.files?.[0];
-  if (!f) return;
+function loadAudioFile(f: File) {
   const { ctx, analyser } = ensureAudio();
   disconnectCurrent();
   audioEl.pause();
@@ -589,6 +589,25 @@ fileInput.addEventListener('change', () => {
   playBtn.disabled = false;
   playBtn.textContent = 'play';
   statusEl.textContent = f.name;
+}
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files?.[0];
+  if (f) loadAudioFile(f);
+});
+
+// drag-and-drop audio onto the canvas
+canvas.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+});
+canvas.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const f = e.dataTransfer?.files?.[0];
+  if (f && (f.type.startsWith('audio/') || /\.(mp3|wav|ogg|flac|m4a|aac)$/i.test(f.name))) {
+    loadAudioFile(f);
+  } else if (f) {
+    statusEl.textContent = `unsupported file type: ${f.type || f.name}`;
+  }
 });
 
 playBtn.addEventListener('click', async () => {
@@ -607,24 +626,53 @@ audioEl.addEventListener('ended', () => {
   playBtn.textContent = 'play';
 });
 
+function attachStream(stream: MediaStream, label: string, opts?: { audible?: boolean }) {
+  const { ctx, analyser } = ensureAudio();
+  audioEl.pause();
+  disconnectCurrent();
+  micStream = stream; // reuse cleanup path (track stop on disconnect)
+  const src = ctx.createMediaStreamSource(stream);
+  src.connect(analyser);
+  // Tab audio: also connect to destination so the user hears the captured
+  // audio (otherwise the visualization runs but they hear silence).
+  // Mic: never connect to destination — feedback risk.
+  if (opts?.audible) analyser.connect(ctx.destination);
+  connectBpmSource(src, BPM_GAIN_MIC);
+  currentSourceNode = src;
+  playBtn.disabled = true;
+  statusEl.textContent = label;
+}
+
 micBtn.addEventListener('click', async () => {
   try {
-    const { ctx, analyser } = ensureAudio();
+    const { ctx } = ensureAudio();
     if (ctx.state === 'suspended') await ctx.resume();
-    audioEl.pause();
-    disconnectCurrent();
-    micStream = await navigator.mediaDevices.getUserMedia({
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     });
-    const src = ctx.createMediaStreamSource(micStream);
-    src.connect(analyser);
-    // do NOT connect mic → destination (feedback)
-    connectBpmSource(src, BPM_GAIN_MIC);
-    currentSourceNode = src;
-    playBtn.disabled = true;
-    statusEl.textContent = 'mic live';
+    attachStream(stream, 'mic live');
   } catch (e) {
     statusEl.textContent = `mic blocked: ${(e as Error).message}`;
+  }
+});
+
+tabBtn.addEventListener('click', async () => {
+  try {
+    const { ctx } = ensureAudio();
+    if (ctx.state === 'suspended') await ctx.resume();
+    // getDisplayMedia requires video:true to be acceptable across browsers,
+    // even when we only want the audio track. We stop the video track
+    // immediately to avoid the encoded-frame overhead.
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    stream.getVideoTracks().forEach((t) => t.stop());
+    if (stream.getAudioTracks().length === 0) {
+      stream.getTracks().forEach((t) => t.stop());
+      statusEl.textContent = 'no tab audio — tick "share tab audio" in the picker';
+      return;
+    }
+    attachStream(stream, 'tab audio', { audible: true });
+  } catch (e) {
+    statusEl.textContent = `tab audio failed: ${(e as Error).message}`;
   }
 });
 
@@ -688,6 +736,41 @@ canvas.addEventListener('click', () => {
   if (autoMicTried || currentSourceNode) return;
   autoMicTried = true;
   micBtn.click();
+});
+
+// ----- keyboard shortcuts -----
+document.addEventListener('keydown', (e) => {
+  // ignore key events fired inside form fields
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+  switch (e.key.toLowerCase()) {
+    case ' ':
+      e.preventDefault();
+      if (!playBtn.disabled) playBtn.click();
+      break;
+    case 'b':
+      bloom.enabled = !bloom.enabled;
+      statusEl.textContent = `bloom ${bloom.enabled ? 'on' : 'off'}`;
+      break;
+    case 'f':
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+      else document.exitFullscreen();
+      break;
+    case 'r':
+      if (bpmAnalyzer) {
+        bpm = 0;
+        bpmCandidate = 0;
+        bpmAnalyzer.reset();
+        statusEl.textContent = 'bpm reset';
+      }
+      break;
+  }
+});
+
+// ----- UI auto-hide after 3 s of no interaction -----
+let lastInteractionAt = performance.now();
+const markInteraction = () => { lastInteractionAt = performance.now(); };
+['pointermove', 'pointerdown', 'keydown', 'wheel'].forEach((ev) => {
+  document.addEventListener(ev, markInteraction, { passive: true });
 });
 
 // ----- animation loop -----
@@ -763,6 +846,12 @@ function animate() {
 
   // beat pulse breathes the whole landscape vertically
   uniforms.uHeightMul.value = 1.0 + beatPulse * 0.10;
+
+  // UI auto-hide
+  const idle = performance.now() - lastInteractionAt > 3000;
+  if (idle !== uiEl.classList.contains('idle')) {
+    uiEl.classList.toggle('idle', idle);
+  }
   // hue rotates with locked BPM: 60 → -0.05 turns (cooler), 180 → +0.05 turns (warmer)
   const tempoForHue = bpm > 0 ? bpm : 120;
   uniforms.uHueShift.value = Math.max(-0.05, Math.min(0.05, (tempoForHue - 120) / 60 * 0.05));

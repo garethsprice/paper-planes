@@ -32,6 +32,11 @@ html, body {
   font-size: 12px;
   letter-spacing: 0.04em;
   text-transform: lowercase;
+  transition: opacity 0.5s ease;
+}
+#ui.idle {
+  opacity: 0;
+  pointer-events: none;
 }
 .btn {
   padding: 6px 12px;
