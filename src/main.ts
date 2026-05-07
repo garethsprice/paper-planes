@@ -858,6 +858,9 @@ const CAM_PRESETS: CamPreset[] = [
   { yaw: 0.6,      pitch: 0.25, radius: 32, height: 14 }, // 3/4 high-side
   { yaw: -0.5,     pitch: -0.1, radius: 22, height: 6  }, // low-left
   { yaw: Math.PI,  pitch: 0.35, radius: 36, height: 18 }, // overhead reverse
+  // True top-down. Tiny radius (=> small forward offset) keeps the camera's
+  // up-vector well-defined; a pure (0, h, 0) → lookAt(0,0,0) is degenerate.
+  { yaw: 0,        pitch: 0.0,  radius: 2,  height: 42 }, // straight overhead
 ];
 
 // 4 cinematic presets, then chase + cockpit per ship. 'C' cycles, auto-advance
