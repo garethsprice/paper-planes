@@ -407,7 +407,7 @@ let bpmGain: GainNode | null = null;
 // mic input ~4× brings it into the working range. File sources are usually
 // near full-scale and use unity gain.
 const BPM_GAIN_FILE = 1.0;
-const BPM_GAIN_MIC = 4.0;
+const BPM_GAIN_MIC = 8.0;
 let bpm = 0;          // locked BPM (0 until first stable estimate)
 let bpmCandidate = 0; // most recent top candidate (early-feedback display)
 let bassEnergy = 0;   // mean of low-band FFT bins (drives bloom pulse)
@@ -636,6 +636,16 @@ canvas.addEventListener('pointermove', (e) => {
   targetYaw += dx * 0.0035;
   targetPitch += dy * 0.0025;
   targetPitch = Math.max(-0.45, Math.min(0.55, targetPitch));
+});
+
+// auto-start mic on the first canvas click (user-gesture context for
+// getUserMedia + AudioContext.resume). Bypassed if a source is already
+// connected via file/mic button.
+let autoMicTried = false;
+canvas.addEventListener('click', () => {
+  if (autoMicTried || currentSourceNode) return;
+  autoMicTried = true;
+  micBtn.click();
 });
 
 // ----- animation loop -----
