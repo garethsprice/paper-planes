@@ -404,11 +404,7 @@ type Ship = {
   roll: number;
   prevY: number;
   wanderSeed: number;
-  trailPositions: Float32Array; // (TRAIL_LEN × 3), oldest at slot 0
-  trailGeometry: THREE.BufferGeometry;
-  trailPosAttr: THREE.BufferAttribute;
 };
-const TRAIL_LEN = 45;
 
 function makeShip(seed: number, x0: number, z0: number): Ship {
   const group = new THREE.Group();
@@ -416,38 +412,6 @@ function makeShip(seed: number, x0: number, z0: number): Ship {
   group.add(new THREE.LineSegments(shipGeom, shipMat));
   group.position.set(x0, 4, z0);
   scene.add(group);
-
-  // trail: continuous line from oldest (faded) to newest (bright)
-  const trailPositions = new Float32Array(TRAIL_LEN * 3);
-  // initialize all slots at ship position so the line doesn't streak from origin
-  for (let i = 0; i < TRAIL_LEN; i++) {
-    trailPositions[i * 3] = x0;
-    trailPositions[i * 3 + 1] = 4;
-    trailPositions[i * 3 + 2] = z0;
-  }
-  const trailColors = new Float32Array(TRAIL_LEN * 3);
-  for (let i = 0; i < TRAIL_LEN; i++) {
-    const t = i / (TRAIL_LEN - 1); // 0 = tail, 1 = head
-    // Subtle ramp — bright enough to read against the dark sky, not bright
-    // enough to compete with the ship body or terrain peaks.
-    trailColors[i * 3]     = t * 0.30;
-    trailColors[i * 3 + 1] = t * 0.40;
-    trailColors[i * 3 + 2] = t * 0.45;
-  }
-  const trailGeometry = new THREE.BufferGeometry();
-  const trailPosAttr = new THREE.BufferAttribute(trailPositions, 3);
-  trailPosAttr.setUsage(THREE.DynamicDrawUsage);
-  trailGeometry.setAttribute('position', trailPosAttr);
-  trailGeometry.setAttribute('color', new THREE.BufferAttribute(trailColors, 3));
-  const trailMat = new THREE.LineBasicMaterial({
-    vertexColors: true,
-    transparent: true,
-    fog: false,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-  });
-  scene.add(new THREE.Line(trailGeometry, trailMat));
-
   return {
     group,
     heading: 0,
@@ -456,9 +420,6 @@ function makeShip(seed: number, x0: number, z0: number): Ship {
     roll: 0,
     prevY: 4,
     wanderSeed: seed,
-    trailPositions,
-    trailGeometry,
-    trailPosAttr,
   };
 }
 
@@ -553,18 +514,6 @@ function updateShip(ship: Ship, dt: number, time: number, level: number, centroi
   ship.roll += (targetRoll - ship.roll) * orientLerp;
   ship.pitch += (targetPitch - ship.pitch) * orientLerp;
   ship.group.rotation.set(ship.pitch, ship.heading, ship.roll);
-
-  // 7. trail — emit from the keel-tail behind the ship (not the centroid),
-  // so the ship body itself stays in focus and the streak only appears once
-  // it leaves the craft. Backward = -forward; the keel-tail sits ~0.5 units
-  // behind the rotation pivot and 0.7 below it (matches the ship geometry).
-  const tp = ship.trailPositions;
-  tp.copyWithin(0, 3, TRAIL_LEN * 3);
-  const tail = (TRAIL_LEN - 1) * 3;
-  tp[tail]     = pos.x - fwdX * 0.5;
-  tp[tail + 1] = pos.y - 0.7;
-  tp[tail + 2] = pos.z - fwdZ * 0.5;
-  ship.trailPosAttr.needsUpdate = true;
 }
 
 // ----- audio plumbing -----
