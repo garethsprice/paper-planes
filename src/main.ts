@@ -147,8 +147,10 @@ const sharedUniforms = {
   uFogColor: { value: new THREE.Color(0x000308) },
   uHeightScale: { value: HEIGHT_SCALE },
   uDepthHalf: { value: DEPTH * 0.5 },
-  uHeightMul: { value: 1.0 },  // beat-pulse pumps the whole landscape vertically
-  uHueShift: { value: 0.0 },   // BPM-driven hue rotation
+  uHeightMul: { value: 1.0 },        // beat-pulse pumps the whole landscape vertically
+  uHueShift: { value: 0.0 },         // BPM-driven hue rotation
+  uAuroraPhase: { value: 0.0 },      // sweeping aurora band x position phase
+  uAuroraIntensity: { value: 0.0 },  // 0 during quiet, ramps with intensity
 };
 const uniforms = {
   ...sharedUniforms,
@@ -192,6 +194,9 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
   uniform float uHeightScale;
   uniform float uHueShift;
   uniform float uOpacity;
+  uniform float uAuroraPhase;
+  uniform float uAuroraIntensity;
+  uniform float uDepthHalf;
 
   // cool → hot gradient
   vec3 grade(float t) {
@@ -243,6 +248,20 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
     // fade old rows toward black for depth
     float ageFade = 1.0 - smoothstep(0.55, 1.0, vRowAge);
     col *= ageFade;
+
+    // aurora band — slow horizontal wash that sweeps across the X axis,
+    // distinct from the height gradient. Hidden during quiet sections.
+    if (uAuroraIntensity > 0.001) {
+      float auroraCenter = sin(uAuroraPhase) * uDepthHalf;
+      float auroraDist = abs(vWorldXZ.x - auroraCenter);
+      float auroraBand = exp(-pow(auroraDist / 6.0, 2.0));
+      vec3 auroraColor = mix(
+        vec3(0.4, 0.0, 0.8),
+        vec3(0.0, 0.9, 0.4),
+        0.5 + 0.5 * sin(uAuroraPhase * 0.7)
+      );
+      col += auroraColor * auroraBand * uAuroraIntensity * ageFade;
+    }
 
     // distance fog
     float fogF = smoothstep(uFogNear, uFogFar, vViewDist);
@@ -397,6 +416,8 @@ type Ship = {
   roll: number;
   prevY: number;
   wanderSeed: number;
+  lastTargetX: number; // last frame's chosen target — leader's value is read by wingmen during formation
+  lastTargetZ: number;
 };
 
 function makeShip(seed: number, x0: number, z0: number): Ship {
@@ -413,6 +434,8 @@ function makeShip(seed: number, x0: number, z0: number): Ship {
     roll: 0,
     prevY: 4,
     wanderSeed: seed,
+    lastTargetX: x0,
+    lastTargetZ: z0,
   };
 }
 
@@ -422,6 +445,30 @@ const ships: Ship[] = [
   makeShip(67.3, -10, SHIP_Z_CENTER + 4),
   makeShip(141.9, 10, SHIP_Z_CENTER - 4),
 ];
+
+// ----- formation flight — synchronised motion frisson trigger.
+// On a drop event we lock all three ships into a delta formation centered on
+// the leader's wander target, hold for a few bars, then disperse. The
+// chaos→synchrony→chaos transition is the murmuration effect.
+const formation = {
+  active: false,
+  startedAt: 0,
+  endsAt: 0,
+  blendIn: 0,  // 0..1, eased over ~0.6s on enter
+  blendOut: 0, // 1..0, eased over ~0.8s on exit
+};
+// Slot offsets in the formation, leader-relative. ships[0] is the leader.
+const FORMATION_SLOTS: { dx: number; dz: number }[] = [
+  { dx: 0,    dz: 0 },    // leader
+  { dx: -3.5, dz: 2.5 },  // wing-left, slightly behind
+  { dx: 3.5,  dz: 2.5 },  // wing-right, slightly behind
+];
+function activateFormation(durationMs: number) {
+  if (formation.active) return; // don't restart mid-pass
+  formation.active = true;
+  formation.startedAt = performance.now();
+  formation.endsAt = performance.now() + durationMs;
+}
 
 function bilerpHeight(wx: number, wz: number): number {
   const fx = (wx / WIDTH + 0.5) * (COLS - 1);
@@ -451,7 +498,7 @@ function wrapAngle(a: number): number {
   return ((a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
 }
 
-function updateShip(ship: Ship, dt: number, time: number, level: number, centroid: number): void {
+function updateShip(ship: Ship, idx: number, dt: number, time: number, level: number, centroid: number): void {
   const pos = ship.group.position;
   // 1. wandering target — slow simplex noise + audio centroid pull
   const wanderX = noise3(time * 0.07, ship.wanderSeed, 0) * SHIP_X_BOUND;
@@ -460,8 +507,25 @@ function updateShip(ship: Ship, dt: number, time: number, level: number, centroi
       (SHIP_Z_MAX - SHIP_Z_MIN) * 0.45 +
     SHIP_Z_CENTER;
   const centroidShift = (centroid - 0.5) * 2 * SHIP_X_BOUND * 0.5;
-  const targetX = clamp(wanderX * 0.55 + centroidShift * 0.6, -SHIP_X_BOUND, SHIP_X_BOUND);
-  const targetZ = clamp(wanderZ, SHIP_Z_MIN, SHIP_Z_MAX);
+  let targetX = clamp(wanderX * 0.55 + centroidShift * 0.6, -SHIP_X_BOUND, SHIP_X_BOUND);
+  let targetZ = clamp(wanderZ, SHIP_Z_MIN, SHIP_Z_MAX);
+
+  // formation override — wingmen blend their target toward (leader + slot).
+  // formation.blendIn/Out are eased per-frame in animate(); blend = either
+  // direction depending on whether we're entering or exiting formation.
+  if (idx > 0) {
+    const blend = formation.active ? formation.blendIn : formation.blendOut;
+    if (blend > 0.001) {
+      const leader = ships[0];
+      const slot = FORMATION_SLOTS[idx];
+      const slotX = clamp(leader.lastTargetX + slot.dx, -SHIP_X_BOUND, SHIP_X_BOUND);
+      const slotZ = clamp(leader.lastTargetZ + slot.dz, SHIP_Z_MIN, SHIP_Z_MAX);
+      targetX = targetX + (slotX - targetX) * blend;
+      targetZ = targetZ + (slotZ - targetZ) * blend;
+    }
+  }
+  ship.lastTargetX = targetX;
+  ship.lastTargetZ = targetZ;
 
   // 2. heading toward target
   const dx = targetX - pos.x;
@@ -543,6 +607,31 @@ let bpmCandidate = 0; // most recent top candidate (early-feedback display)
 let bassEnergy = 0;   // mean of low-band FFT bins (drives bloom pulse)
 let beatPulse = 0;    // 0..1, set to 1 on each validPeak event, decays per frame
 let lastPeakAt = 0;   // ms timestamp of last triggered peak (refractory gate)
+
+// ----- audio dynamics tracker — three time-scale EMAs of overall level
+// (short ~150 ms, mid ~2 s, long ~10 s). Derived per-frame:
+//   intensity = relative loudness (short / long), drives the global scalar
+//               so the scene goes still during quiet sections.
+//   quiet     = sustained low level, gates "stillness" behaviour.
+//   build     = rising-energy detector, short above mid.
+//   drop      = event fired when short jumps past previous frame, refractory-
+//               gated so a single transient doesn't fire repeatedly.
+const dynamics = {
+  short: 0,
+  mid: 0,
+  long: 0,
+  intensity: 1.0,
+  quiet: false,
+  build: 0,
+  prevShort: 0,
+  dropTime: -Infinity,
+  dropCount: 0,
+  lastDropDelta: 0,
+};
+// Tunables (also exposed via __terrain debug handle further down).
+const DROP_RATIO_THRESHOLD = 1.4;   // short/mid ratio above this triggers a drop
+const DROP_REFRACTORY_MS = 1500;
+const QUIET_THRESHOLD = 0.05;
 let lastBpmSourceNode: AudioNode | null = null; // tracked separately so we
 // can disconnect it from bpmFilter without touching the analyser path.
 
@@ -608,9 +697,11 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
     // expose for ad-hoc DevTools poking + filter/gain tuning
     (window as unknown as { __terrain?: unknown }).__terrain = {
       ctx, analyser, fftBins, bpmAnalyzer: a, bpmFilter, bpmGain,
+      dynamics, formation,
       get bpm() { return bpm; },
       get bpmCandidate() { return bpmCandidate; },
       get bassEnergy() { return bassEnergy; },
+      forceDrop() { onDrop(); }, // trigger drop response manually for testing
       // tweak filter on the fly: __terrain.setFilter(150, 0.7)
       setFilter(freq: number, q: number) {
         if (bpmFilter) {
@@ -802,6 +893,8 @@ function sampleLogBin(data: { length: number; [i: number]: number }, fbin: numbe
 // ----- mouse orbit (subtle, custom) -----
 // Spring physics on yaw/pitch: critically-underdamped → slight overshoot when
 // targets change (manual drag end, cinematic preset switch, bass impulse).
+// Preset switches now ALSO smooth-interpolate radius and height — slow dolly
+// rather than abrupt cut.
 let yaw = 0;
 let pitch = 0;
 let yawVel = 0;
@@ -809,6 +902,8 @@ let pitchVel = 0;
 let prevBassForSpring = 0;
 let targetYaw = 0;
 let targetPitch = 0;
+let camRadius = 28;
+let camHeight = 9;
 const CAM_STIFFNESS = 50;
 const CAM_DAMPING = 9;
 const CAM_BASS_IMPULSE = 0.6;
@@ -927,6 +1022,32 @@ const markInteraction = () => { lastInteractionAt = performance.now(); };
   document.addEventListener(ev, markInteraction, { passive: true });
 });
 
+// ----- drop response: per-event side effects, fired once when dropCount advances -----
+let lastSeenDropCount = 0;
+let dropFovOverlayUntil = 0; // ms timestamp; FOV widens until this time
+
+function onDrop() {
+  // Formation flight for ~6 seconds (≈8 bars at 120 BPM, 4 bars at 60 BPM —
+  // good enough that the formation is held long enough to read).
+  const ms = bpm > 0 ? (60 / bpm) * 1000 * 8 : 6000;
+  activateFormation(ms);
+  // FOV widen pulse — the awe shot
+  dropFovOverlayUntil = performance.now() + 600;
+  // Reveal-shot leitmotif — every 4th drop forces the next camera mode to
+  // the straight-overhead preset. Only when cinematic auto-cycle is on so
+  // the user's manual selection isn't hijacked.
+  if (cinematicAuto && dynamics.dropCount % 4 === 0) {
+    const overheadIdx = CAM_MODES.findIndex(
+      (m) => m.kind === 'preset' && m.label === 'preset 5',
+    );
+    if (overheadIdx >= 0) {
+      currentCamModeIdx = overheadIdx;
+      camModeChangedAt = performance.now();
+      camBeatsAtChange = beatCount;
+    }
+  }
+}
+
 // ----- animation loop -----
 const clock = new THREE.Clock();
 const ROW_STRIDE_FRONT = (ROWS - 1) * COLS; // newest row offset in heights[]
@@ -953,6 +1074,37 @@ function animate() {
     const bMax = Math.min(20, fftBins.length);
     for (let i = 1; i < bMax; i++) bs += fftBins[i];
     bassEnergy = bs / ((bMax - 1) * 255);
+
+    // dynamics signal: peak FFT magnitude (any band). Full-band mean is
+    // dominated by silent bins on percussive material; peak tracks the
+    // loudest active band whatever it is — kick, vocal, lead synth.
+    let peak = 0;
+    for (let i = 1; i < fftBins.length; i++) if (fftBins[i] > peak) peak = fftBins[i];
+    const lvl = peak / 255;
+    const aShort = 1 - Math.exp(-dt / 0.15);
+    const aMid   = 1 - Math.exp(-dt / 2.0);
+    const aLong  = 1 - Math.exp(-dt / 10.0);
+    dynamics.short += (lvl - dynamics.short) * aShort;
+    dynamics.mid   += (lvl - dynamics.mid)   * aMid;
+    dynamics.long  += (lvl - dynamics.long)  * aLong;
+    // intensity: relative loudness vs the long-window baseline. Tracks the
+    // arrangement instead of absolute volume — quiet music still has crests.
+    dynamics.intensity = Math.min(1.5, dynamics.short / Math.max(0.08, dynamics.long));
+    dynamics.quiet = dynamics.short < QUIET_THRESHOLD;
+    dynamics.build = Math.max(0, Math.min(1, (dynamics.short - dynamics.mid) * 4));
+    // drop detection: short has moved well above the 2 s mid (energy step
+    // up that's sustained, not just a single-frame transient). Refractory
+    // window prevents repeat fires within one drop. The ratio is more
+    // robust than a delta threshold across both percussive and
+    // continuous-energy material.
+    const ratio = dynamics.short / Math.max(0.05, dynamics.mid);
+    const nowMs = performance.now();
+    if (ratio > DROP_RATIO_THRESHOLD && dynamics.short > 0.15 && nowMs - dynamics.dropTime > DROP_REFRACTORY_MS) {
+      dynamics.dropTime = nowMs;
+      dynamics.dropCount++;
+      dynamics.lastDropDelta = ratio;
+    }
+    dynamics.prevShort = dynamics.short;
     const baseIdx = ROW_STRIDE_FRONT;
     for (let ix = 0; ix < COLS; ix++) {
       const amp = sampleLogBin(fftBins, binMap[ix]) / 255; // 0..1
@@ -964,6 +1116,12 @@ function animate() {
     }
   } else {
     bassEnergy = 0;
+    dynamics.short *= 0.95; // decay all EMAs toward zero when no audio
+    dynamics.mid   *= 0.99;
+    dynamics.long  *= 0.998;
+    dynamics.intensity = Math.min(1.5, dynamics.short / Math.max(0.08, dynamics.long));
+    dynamics.quiet = true;
+    dynamics.build = 0;
     // idle look — gently undulating noise field
     const baseIdx = ROW_STRIDE_FRONT;
     for (let ix = 0; ix < COLS; ix++) {
@@ -996,7 +1154,35 @@ function animate() {
     for (let i = 1; i < fftBins.length; i++) { cn += i * fftBins[i]; cd += fftBins[i]; }
     if (cd > 0) centroid = cn / cd / (fftBins.length - 1);
   }
-  for (const ship of ships) updateShip(ship, dt, t, level, centroid);
+  // fire drop-response side effects when a new drop has been recorded
+  if (dynamics.dropCount !== lastSeenDropCount) {
+    lastSeenDropCount = dynamics.dropCount;
+    onDrop();
+  }
+
+  // global reactivity scalars derived from dynamics — used throughout the
+  // remainder of the frame.
+  const sinceDrop = (performance.now() - dynamics.dropTime) / 1000;
+  const dropBoost = sinceDrop < 1.5 ? Math.exp(-sinceDrop * 2.0) : 0;
+  const I = dynamics.intensity;
+
+  // FOV widen pulse during the brief drop overlay
+  const fovOverlay = Math.max(0, dropFovOverlayUntil - performance.now()) / 600;
+  const targetFov = 55 + fovOverlay * 8;
+  if (Math.abs(camera.fov - targetFov) > 0.01) {
+    camera.fov = targetFov;
+    camera.updateProjectionMatrix();
+  }
+
+  // formation lifecycle: ease blend in/out, expire when window passes
+  if (formation.active && performance.now() > formation.endsAt) {
+    formation.active = false; // stays in blendOut decay until next activation
+  }
+  const formationLerp = 1 - Math.exp(-(formation.active ? 1.7 : 1.2) * dt);
+  formation.blendIn += ((formation.active ? 1 : 0) - formation.blendIn) * formationLerp;
+  formation.blendOut = formation.blendIn; // single state suffices — blend toward target
+
+  ships.forEach((ship, i) => updateShip(ship, i, dt, t, level, centroid));
 
   // auto-advance camera mode every 8 beats (BPM-locked) or 8 s fallback —
   // only when cinematic auto-cycle is on. 'V' toggles, 'C' jumps regardless.
@@ -1019,7 +1205,10 @@ function animate() {
   const camMode = CAM_MODES[currentCamModeIdx];
   if (camMode.kind === 'preset') {
     // spring orbit around origin, with bass attack impulse on yaw and bass
-    // amplitude pulling the radius in.
+    // amplitude pulling the radius in. radius/height now also smoothly
+    // interpolate so preset → preset transitions are slow dollies rather
+    // than abrupt cuts. Anticipation build pulls the camera back; drop
+    // FOV-widen does not affect radius (it widens the lens instead).
     const p = camMode.preset;
     targetYaw = p.yaw;
     targetPitch = p.pitch;
@@ -1032,10 +1221,15 @@ function animate() {
     const pitchAccel = (targetPitch - pitch) * CAM_STIFFNESS - pitchVel * CAM_DAMPING;
     pitchVel += pitchAccel * dt;
     pitch += pitchVel * dt;
-    const radius = p.radius - bassEnergy * 2.5;
-    camera.position.x = Math.sin(yaw) * radius;
-    camera.position.z = Math.cos(yaw) * radius;
-    camera.position.y = p.height + pitch * 12;
+    // dt-aware exponential lerp on radius/height (≈1.5 s settle for big jumps)
+    const dollyLerp = 1 - Math.exp(-2.0 * dt);
+    const targetRadius = p.radius - bassEnergy * 2.5 * I + dynamics.build * 5;
+    const targetHeight = p.height + dynamics.build * 2;
+    camRadius += (targetRadius - camRadius) * dollyLerp;
+    camHeight += (targetHeight - camHeight) * dollyLerp;
+    camera.position.x = Math.sin(yaw) * camRadius;
+    camera.position.z = Math.cos(yaw) * camRadius;
+    camera.position.y = camHeight + pitch * 12;
     camera.lookAt(0, 1.5, 0);
   } else if (camMode.kind === 'chase') {
     // 5 units behind the ship, 2.5 above; lerp-smoothed so the camera doesn't
@@ -1064,13 +1258,22 @@ function animate() {
     camera.lookAt(sp.x + fwdX * 12, sp.y + 0.05, sp.z + fwdZ * 12);
   }
 
-  // beat pulse breathes the whole landscape vertically
-  uniforms.uHeightMul.value = 1.0 + beatPulse * 0.10;
-  // very subtle star parallax
+  // (sinceDrop and dropBoost computed earlier in this frame, see top of
+  // animation loop block above the camera section.)
+
+  // beat pulse breathes the landscape; scaled by intensity so it's flat on
+  // quiet sections and full-bodied during loud ones.
+  uniforms.uHeightMul.value = 1.0 + beatPulse * 0.10 * I;
+  // aurora: phase sweeps slowly (faster on louder sections), intensity
+  // fades to zero during quiet.
+  uniforms.uAuroraPhase.value += (0.4 + I * 0.4) * dt;
+  uniforms.uAuroraIntensity.value = I * 0.45 + dropBoost * 0.3;
+  // mirror world fades down when the scene is quiet
+  mirrorMaterial.uniforms.uOpacity.value = 0.10 * I;
+  // very subtle star parallax (independent of intensity — the cosmos doesn't pause)
   stars.rotation.y += 0.0003;
-  // nebula rotates faster than stars; bass drops accelerate the swirl
-  nebula.rotation.y += 0.0008 + bassEnergy * 0.004;
-  // recolor by spectral centroid: bass-heavy → cool blue, treble-heavy → warm pink
+  // nebula swirls a bit faster on bass; intensity scales the speed-up
+  nebula.rotation.y += 0.0008 + bassEnergy * 0.004 * I;
   (nebula.material as THREE.PointsMaterial).color.setRGB(
     0.45 + centroid * 0.55,
     0.55 + 0.10 * (1 - centroid),
@@ -1082,16 +1285,18 @@ function animate() {
   if (idle !== uiEl.classList.contains('idle')) {
     uiEl.classList.toggle('idle', idle);
   }
-  // hue: BPM offset + slow time cycle. Per-pixel iridescent shimmer is added
-  // in the fragment shader on top of this base value (using uTime).
+  // hue: BPM offset + slow time cycle, attenuated by intensity
   const tempoForHue = bpm > 0 ? bpm : 120;
   const bpmHue = Math.max(-0.05, Math.min(0.05, (tempoForHue - 120) / 60 * 0.05));
-  uniforms.uHueShift.value = bpmHue + Math.sin(t * 0.07) * 0.04;
+  uniforms.uHueShift.value = (bpmHue + Math.sin(t * 0.07) * 0.04) * (0.4 + 0.6 * I);
 
-  // bloom kick on bass transients (decoupled from BPM lock — reacts to energy)
-  bloom.strength = 0.65 + bassEnergy * 0.5;
-  // chromatic aberration pulses with bass
-  chromaticPass.uniforms.uAmount.value = Math.min(0.008, 0.0015 + bassEnergy * 0.006);
+  // bloom kick on bass transients + drop burst
+  bloom.strength = (0.4 + 0.25 * I) + bassEnergy * 0.5 * I + dropBoost * 0.7;
+  // chromatic aberration: subtle baseline + bass + drop burst
+  chromaticPass.uniforms.uAmount.value = Math.min(
+    0.012,
+    0.0008 + bassEnergy * 0.006 * I + dropBoost * 0.005,
+  );
 
   // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
   beatPulse *= Math.exp(-9 * dt); // visible for ~150ms after each peak
