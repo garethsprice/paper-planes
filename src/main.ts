@@ -73,9 +73,10 @@ const bloom = new UnrealBloomPass(
 );
 composer.addPass(bloom);
 
-// Afterimage (feedback motion blur): every bright pixel leaves a fading ghost.
-// damp closer to 1 = longer trails; bass-modulated in animate().
-const afterimagePass = new AfterimagePass(0.93);
+// Afterimage (feedback motion blur): subtle fading ghost behind bright pixels.
+// damp closer to 1 = longer/brighter trails. Kept low so the effect is felt
+// rather than seen — bumps slightly on bass.
+const afterimagePass = new AfterimagePass(0.82);
 composer.addPass(afterimagePass);
 
 // Chromatic aberration: subtle radial RGB split, expands on bass.
@@ -262,7 +263,7 @@ material.needsUpdate = true;
 
 // ----- mirror world: same geometry/shader, flipped Y, dimmer -----
 const mirrorMaterial = new THREE.ShaderMaterial({
-  uniforms: { ...sharedUniforms, uOpacity: { value: 0.32 } },
+  uniforms: { ...sharedUniforms, uOpacity: { value: 0.10 } },
   vertexShader: TERRAIN_VERTEX_SHADER,
   fragmentShader: TERRAIN_FRAGMENT_SHADER,
   transparent: true,
@@ -333,6 +334,7 @@ const nebula = (() => {
     color: 0x80b8ff,
   });
   const p = new THREE.Points(geom, mat);
+  p.visible = false; // hidden by default — N toggles
   scene.add(p);
   return p;
 })();
@@ -938,6 +940,10 @@ document.addEventListener('keydown', (e) => {
         statusEl.textContent = 'bpm reset';
       }
       break;
+    case 'n':
+      nebula.visible = !nebula.visible;
+      statusEl.textContent = `nebula ${nebula.visible ? 'on' : 'off'}`;
+      break;
     case 'c':
       cinematicMode = !cinematicMode;
       // start the timer/beat-window from "now" so the first switch happens
@@ -1093,7 +1099,7 @@ function animate() {
   // bloom kick on bass transients (decoupled from BPM lock — reacts to energy)
   bloom.strength = 0.65 + bassEnergy * 0.5;
   // afterimage damp + chromatic aberration both pulse with bass
-  afterimagePass.uniforms.damp.value = 0.93 + bassEnergy * 0.04;
+  afterimagePass.uniforms.damp.value = 0.82 + bassEnergy * 0.04;
   chromaticPass.uniforms.uAmount.value = Math.min(0.008, 0.0015 + bassEnergy * 0.006);
 
   // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
