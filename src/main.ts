@@ -805,7 +805,8 @@ const CAM_PRESETS: CamPreset[] = [
 ];
 let cinematicMode = false;
 let cinematicPresetIdx = 0;
-let cinematicPresetAt = 0;
+let cinematicPresetAt = 0;          // ms timestamp of last preset switch
+let cinematicBeatsAtSwitch = 0;     // beatCount snapshot at last switch
 let beatCount = 0;
 
 // ----- keyboard shortcuts -----
@@ -835,7 +836,10 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'c':
       cinematicMode = !cinematicMode;
+      // start the timer/beat-window from "now" so the first switch happens
+      // beatsPerSwitch beats after the toggle, not immediately.
       cinematicPresetAt = performance.now();
+      cinematicBeatsAtSwitch = beatCount;
       statusEl.textContent = `cinematic ${cinematicMode ? 'on' : 'off'}`;
       break;
   }
@@ -919,18 +923,20 @@ function animate() {
   }
   for (const ship of ships) updateShip(ship, dt, t, level, centroid);
 
-  // cinematic mode advances the active preset every 8 beats (one bar at 4/4
-  // taken twice) when BPM is locked, or every 8 seconds otherwise. The user's
-  // pointer drag still feeds targetYaw/pitch — we just override them here.
+  // cinematic mode advances the active preset every 8 beats (≈two bars at 4/4)
+  // when BPM is locked, or every 8 seconds otherwise. Track beats-since-last-
+  // switch (NOT absolute beatCount × idx — idx wraps mod CAM_PRESETS.length so
+  // that comparison would pass every frame after the first wrap → jitter).
   if (cinematicMode) {
     const beatsPerSwitch = 8;
     const fallbackMs = 8000;
     const ready = bpm > 0
-      ? beatCount - cinematicPresetIdx * beatsPerSwitch >= beatsPerSwitch
+      ? beatCount - cinematicBeatsAtSwitch >= beatsPerSwitch
       : performance.now() - cinematicPresetAt >= fallbackMs;
     if (ready) {
       cinematicPresetIdx = (cinematicPresetIdx + 1) % CAM_PRESETS.length;
       cinematicPresetAt = performance.now();
+      cinematicBeatsAtSwitch = beatCount;
     }
     const p = CAM_PRESETS[cinematicPresetIdx];
     targetYaw = p.yaw;
