@@ -211,6 +211,36 @@ const material = new THREE.ShaderMaterial({
 const grid = new THREE.LineSegments(geometry, material);
 scene.add(grid);
 
+// ----- star field — points at far radius, slow rotation for parallax -----
+const stars = (() => {
+  const STAR_COUNT = 600;
+  const starPos = new Float32Array(STAR_COUNT * 3);
+  for (let i = 0; i < STAR_COUNT; i++) {
+    // upper-hemisphere bias so stars sit above the camera horizon, not under
+    // the terrain.
+    const r = 90 + Math.random() * 40;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = (0.05 + Math.random() * 0.55) * Math.PI;
+    starPos[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
+    starPos[i * 3 + 1] = r * Math.cos(phi);
+    starPos[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+  }
+  const starGeom = new THREE.BufferGeometry();
+  starGeom.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  const starMat = new THREE.PointsMaterial({
+    color: 0xc8d8ff,
+    size: 0.45,
+    sizeAttenuation: true,
+    fog: false,
+    transparent: true,
+    opacity: 0.75,
+    depthWrite: false,
+  });
+  const s = new THREE.Points(starGeom, starMat);
+  scene.add(s);
+  return s;
+})();
+
 // ----- ship: Asteroids-style triangle, autopiloted with a simple flight model -----
 // State: heading angle (yaw around world Y), scalar speed, separate altitude.
 // Each frame: pick a wandering target (audio centroid + slow simplex noise),
@@ -266,21 +296,80 @@ const shipGeom = new THREE.BufferGeometry();
   ]);
 }
 const shipMat = new THREE.LineBasicMaterial({ color: 0xeaffff, fog: false });
-const shipMesh = new THREE.LineSegments(shipGeom, shipMat);
-const shipGroup = new THREE.Group();
-shipGroup.rotation.order = 'YXZ'; // yaw, then pitch, then roll (aircraft order)
-shipGroup.add(shipMesh);
-shipGroup.position.set(0, 4, SHIP_Z_CENTER);
-scene.add(shipGroup);
 
-const shipState = {
-  heading: 0, // 0 rad = nose facing world -Z (away from camera)
-  speed: SHIP_BASE_SPEED,
-  pitch: 0,
-  roll: 0,
-  prevY: 4,
-  wanderSeed: Math.random() * 100,
+// ----- ships: 3 instances, each with its own wander phase, position, and trail.
+type Ship = {
+  group: THREE.Group;
+  heading: number;
+  speed: number;
+  pitch: number;
+  roll: number;
+  prevY: number;
+  wanderSeed: number;
+  trailPositions: Float32Array; // (TRAIL_LEN × 3), oldest at slot 0
+  trailGeometry: THREE.BufferGeometry;
+  trailPosAttr: THREE.BufferAttribute;
 };
+const TRAIL_LEN = 60;
+
+function makeShip(seed: number, x0: number, z0: number): Ship {
+  const group = new THREE.Group();
+  group.rotation.order = 'YXZ';
+  group.add(new THREE.LineSegments(shipGeom, shipMat));
+  group.position.set(x0, 4, z0);
+  scene.add(group);
+
+  // trail: continuous line from oldest (faded) to newest (bright)
+  const trailPositions = new Float32Array(TRAIL_LEN * 3);
+  // initialize all slots at ship position so the line doesn't streak from origin
+  for (let i = 0; i < TRAIL_LEN; i++) {
+    trailPositions[i * 3] = x0;
+    trailPositions[i * 3 + 1] = 4;
+    trailPositions[i * 3 + 2] = z0;
+  }
+  const trailColors = new Float32Array(TRAIL_LEN * 3);
+  for (let i = 0; i < TRAIL_LEN; i++) {
+    const t = i / (TRAIL_LEN - 1); // 0 = tail, 1 = head
+    // brightness ramps from 0 (tail) to ~1 (head). Additive blending makes
+    // the bright head pop and the dim tail invisible against the dark sky.
+    trailColors[i * 3] = t * 0.8;
+    trailColors[i * 3 + 1] = t * 0.95;
+    trailColors[i * 3 + 2] = t * 1.0;
+  }
+  const trailGeometry = new THREE.BufferGeometry();
+  const trailPosAttr = new THREE.BufferAttribute(trailPositions, 3);
+  trailPosAttr.setUsage(THREE.DynamicDrawUsage);
+  trailGeometry.setAttribute('position', trailPosAttr);
+  trailGeometry.setAttribute('color', new THREE.BufferAttribute(trailColors, 3));
+  const trailMat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    fog: false,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  scene.add(new THREE.Line(trailGeometry, trailMat));
+
+  return {
+    group,
+    heading: 0,
+    speed: SHIP_BASE_SPEED,
+    pitch: 0,
+    roll: 0,
+    prevY: 4,
+    wanderSeed: seed,
+    trailPositions,
+    trailGeometry,
+    trailPosAttr,
+  };
+}
+
+// Three ships, staggered so they don't pile up at the same point
+const ships: Ship[] = [
+  makeShip(13.7, 0, SHIP_Z_CENTER),
+  makeShip(67.3, -10, SHIP_Z_CENTER + 4),
+  makeShip(141.9, 10, SHIP_Z_CENTER - 4),
+];
 
 function bilerpHeight(wx: number, wz: number): number {
   const fx = (wx / WIDTH + 0.5) * (COLS - 1);
@@ -310,104 +399,71 @@ function wrapAngle(a: number): number {
   return ((a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
 }
 
-function updateShip(dt: number, time: number): void {
-  // 1. audio bands
-  let level = 0;
-  // bass is computed once per frame in animate() and stored in bassEnergy.
-  const bass = bassEnergy;
-  let centroid = 0.5;
-  if (fftBins) {
-    let sumAll = 0;
-    for (let i = 0; i < fftBins.length; i++) sumAll += fftBins[i];
-    level = sumAll / (fftBins.length * 255);
-    let cn = 0;
-    let cd = 0;
-    for (let i = 1; i < fftBins.length; i++) {
-      cn += i * fftBins[i];
-      cd += fftBins[i];
-    }
-    if (cd > 0) centroid = cn / cd / (fftBins.length - 1); // 0..1
-  }
-
-  // 2. wandering target — slow simplex noise + audio centroid pull
-  const wanderX = noise3(time * 0.07, shipState.wanderSeed, 0) * SHIP_X_BOUND;
+function updateShip(ship: Ship, dt: number, time: number, level: number, centroid: number): void {
+  const pos = ship.group.position;
+  // 1. wandering target — slow simplex noise + audio centroid pull
+  const wanderX = noise3(time * 0.07, ship.wanderSeed, 0) * SHIP_X_BOUND;
   const wanderZ =
-    noise3(time * 0.06, shipState.wanderSeed + 100, 0) *
+    noise3(time * 0.06, ship.wanderSeed + 100, 0) *
       (SHIP_Z_MAX - SHIP_Z_MIN) * 0.45 +
     SHIP_Z_CENTER;
   const centroidShift = (centroid - 0.5) * 2 * SHIP_X_BOUND * 0.5;
   const targetX = clamp(wanderX * 0.55 + centroidShift * 0.6, -SHIP_X_BOUND, SHIP_X_BOUND);
   const targetZ = clamp(wanderZ, SHIP_Z_MIN, SHIP_Z_MAX);
 
-  // 3. heading control — turn toward target at limited rate
-  const dx = targetX - shipGroup.position.x;
-  const dz = targetZ - shipGroup.position.z;
+  // 2. heading toward target
+  const dx = targetX - pos.x;
+  const dz = targetZ - pos.z;
   const dist = Math.hypot(dx, dz);
-  let desiredHeading = shipState.heading;
-  if (dist > 0.5) {
-    // three.js R_y(h) maps local (0,0,-1) to world (-sin h, 0, -cos h),
-    // so to face toward (dx, _, dz): -sin h = dx/d, -cos h = dz/d → h = atan2(-dx, -dz)
-    desiredHeading = Math.atan2(-dx, -dz);
-  }
-  const headingErr = wrapAngle(desiredHeading - shipState.heading);
+  let desiredHeading = ship.heading;
+  if (dist > 0.5) desiredHeading = Math.atan2(-dx, -dz);
+  const headingErr = wrapAngle(desiredHeading - ship.heading);
   const turnInput = clamp(headingErr * SHIP_TURN_GAIN, -1, 1);
-  shipState.heading = wrapAngle(
-    shipState.heading + turnInput * SHIP_TURN_RATE * dt,
-  );
+  ship.heading = wrapAngle(ship.heading + turnInput * SHIP_TURN_RATE * dt);
 
-  // 4. speed — accelerate toward (base + bass thrust); turning costs speed
-  const targetSpeed = SHIP_BASE_SPEED + bass * SHIP_SPEED_BOOST;
-  shipState.speed += (targetSpeed - shipState.speed) * SHIP_ACCEL_RATE * dt;
+  // 3. speed — accelerate toward (base + bass thrust); turning costs speed; beat kick
+  const targetSpeed = SHIP_BASE_SPEED + bassEnergy * SHIP_SPEED_BOOST;
+  ship.speed += (targetSpeed - ship.speed) * SHIP_ACCEL_RATE * dt;
   const effSpeed =
-    shipState.speed * (1 - SHIP_TURN_SLOWDOWN * Math.abs(turnInput))
-    * (1 + beatPulse * 0.45); // each beat = small thrust kick
+    ship.speed * (1 - SHIP_TURN_SLOWDOWN * Math.abs(turnInput))
+    * (1 + beatPulse * 0.45);
 
-  // 5. integrate position along forward heading.
-  // Forward in world = R_y(heading) * (0,0,-1) = (-sin h, 0, -cos h).
-  const fwdX = -Math.sin(shipState.heading);
-  const fwdZ = -Math.cos(shipState.heading);
-  shipGroup.position.x += fwdX * effSpeed * dt;
-  shipGroup.position.z += fwdZ * effSpeed * dt;
-  shipGroup.position.x = clamp(shipGroup.position.x, -SHIP_X_BOUND, SHIP_X_BOUND);
-  shipGroup.position.z = clamp(shipGroup.position.z, SHIP_Z_MIN, SHIP_Z_MAX);
+  // 4. integrate position
+  const fwdX = -Math.sin(ship.heading);
+  const fwdZ = -Math.cos(ship.heading);
+  pos.x = clamp(pos.x + fwdX * effSpeed * dt, -SHIP_X_BOUND, SHIP_X_BOUND);
+  pos.z = clamp(pos.z + fwdZ * effSpeed * dt, SHIP_Z_MIN, SHIP_Z_MAX);
 
-  // 6. altitude — clear terrain at current + forward sample, plus audio lift
-  const aheadX = shipGroup.position.x + fwdX * SHIP_LOOKAHEAD_DIST;
-  const aheadZ = shipGroup.position.z + fwdZ * SHIP_LOOKAHEAD_DIST;
-  const tHere = bilerpHeight(shipGroup.position.x, shipGroup.position.z);
+  // 5. altitude
+  const aheadX = pos.x + fwdX * SHIP_LOOKAHEAD_DIST;
+  const aheadZ = pos.z + fwdZ * SHIP_LOOKAHEAD_DIST;
+  const tHere = bilerpHeight(pos.x, pos.z);
   const tAhead = bilerpHeight(aheadX, aheadZ);
   const audioLift = level * 3.0;
-  let targetY = Math.max(
-    Math.max(tHere, tAhead) + SHIP_CLEARANCE,
-    SHIP_Y_MIN + audioLift,
-  );
+  let targetY = Math.max(Math.max(tHere, tAhead) + SHIP_CLEARANCE, SHIP_Y_MIN + audioLift);
   targetY = Math.min(SHIP_Y_MAX, targetY);
-  shipState.prevY = shipGroup.position.y;
-  // dt-aware exponential lerp
-  const yLerp = 1 - Math.exp(-6 * dt);
-  shipGroup.position.y += (targetY - shipGroup.position.y) * yLerp;
-  // hard collision safety
-  const tSafe = bilerpHeight(shipGroup.position.x, shipGroup.position.z);
-  if (shipGroup.position.y < tSafe + SHIP_HARD_CLEAR) {
-    shipGroup.position.y = tSafe + SHIP_HARD_CLEAR;
-  }
+  ship.prevY = pos.y;
+  pos.y += (targetY - pos.y) * (1 - Math.exp(-6 * dt));
+  const tSafe = bilerpHeight(pos.x, pos.z);
+  if (pos.y < tSafe + SHIP_HARD_CLEAR) pos.y = tSafe + SHIP_HARD_CLEAR;
 
-  // 7. orientation — bank into turns, pitch with climb rate
-  const climbRate = (shipGroup.position.y - shipState.prevY) / Math.max(dt, 1e-3);
-  // Bank into the turn. Under three.js Y-rotation, increasing heading turns
-  // LEFT (nose rotates CCW seen from above). Left turn → left bank → right
-  // wing up → positive rotation.z. So roll has the SAME sign as turnInput.
+  // 6. orientation
+  const climbRate = (pos.y - ship.prevY) / Math.max(dt, 1e-3);
   const targetRoll = turnInput * SHIP_MAX_BANK;
-  const targetPitch = clamp(
-    climbRate * SHIP_PITCH_GAIN,
-    -SHIP_MAX_PITCH,
-    SHIP_MAX_PITCH,
-  );
+  const targetPitch = clamp(climbRate * SHIP_PITCH_GAIN, -SHIP_MAX_PITCH, SHIP_MAX_PITCH);
   const orientLerp = 1 - Math.exp(-7 * dt);
-  shipState.roll += (targetRoll - shipState.roll) * orientLerp;
-  shipState.pitch += (targetPitch - shipState.pitch) * orientLerp;
-  // rotation.set(x, y, z): with order 'YXZ' three.js applies y (yaw) → x (pitch) → z (roll)
-  shipGroup.rotation.set(shipState.pitch, shipState.heading, shipState.roll);
+  ship.roll += (targetRoll - ship.roll) * orientLerp;
+  ship.pitch += (targetPitch - ship.pitch) * orientLerp;
+  ship.group.rotation.set(ship.pitch, ship.heading, ship.roll);
+
+  // 7. trail — shift positions back one slot, write current pos at the tail
+  const tp = ship.trailPositions;
+  tp.copyWithin(0, 3, TRAIL_LEN * 3); // slot[i+1] → slot[i], tail still has old data
+  const tail = (TRAIL_LEN - 1) * 3;
+  tp[tail] = pos.x;
+  tp[tail + 1] = pos.y - 0.2; // anchor trail slightly below ship belly
+  tp[tail + 2] = pos.z;
+  ship.trailPosAttr.needsUpdate = true;
 }
 
 // ----- audio plumbing -----
@@ -831,8 +887,18 @@ function animate() {
   }
   posAttr.needsUpdate = true;
 
-  // ship autopilot uses freshly-updated heights[] for path/collision
-  updateShip(dt, t);
+  // overall audio level + spectral centroid — shared across all ships
+  let level = 0;
+  let centroid = 0.5;
+  if (fftBins) {
+    let sumAll = 0;
+    for (let i = 0; i < fftBins.length; i++) sumAll += fftBins[i];
+    level = sumAll / (fftBins.length * 255);
+    let cn = 0, cd = 0;
+    for (let i = 1; i < fftBins.length; i++) { cn += i * fftBins[i]; cd += fftBins[i]; }
+    if (cd > 0) centroid = cn / cd / (fftBins.length - 1);
+  }
+  for (const ship of ships) updateShip(ship, dt, t, level, centroid);
 
   // damped orbit + bass-driven push-in
   yaw += (targetYaw - yaw) * 0.08;
@@ -846,6 +912,8 @@ function animate() {
 
   // beat pulse breathes the whole landscape vertically
   uniforms.uHeightMul.value = 1.0 + beatPulse * 0.10;
+  // very subtle star parallax
+  stars.rotation.y += 0.0003;
 
   // UI auto-hide
   const idle = performance.now() - lastInteractionAt > 3000;
