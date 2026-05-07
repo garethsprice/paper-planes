@@ -1,0 +1,21 @@
+{
+  "name": "terrain",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "simplex-noise": "^4.0.3",
+    "three": "^0.166.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.166.0",
+    "@vitejs/plugin-basic-ssl": "^1.2.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.1"
+  }
+}

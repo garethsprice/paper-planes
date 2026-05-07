@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>terrain · audio-reactive spectrogram</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+    <div id="ui">
+      <label class="btn">
+        <input id="file" type="file" accept="audio/*" hidden />
+        load audio
+      </label>
+      <button id="play" class="btn" disabled>play</button>
+      <button id="mic" class="btn">use mic</button>
+      <span id="status">drop a track or use mic</span>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
