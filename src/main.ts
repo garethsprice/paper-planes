@@ -4,7 +4,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { createNoise3D } from 'simplex-noise';
-import { createRealtimeBpmAnalyzer, type BpmAnalyzer } from 'realtime-bpm-analyzer';
+import { createRealtimeBpmAnalyzer, getBiquadFilter, type BpmAnalyzer } from 'realtime-bpm-analyzer';
 
 // ----- grid params -----
 const COLS = 129; // freq axis (PlaneGeometry(_, _, 128, 128) → 129 verts)
@@ -390,17 +390,21 @@ let micStream: MediaStream | null = null;
 const audioEl = new Audio();
 audioEl.crossOrigin = 'anonymous';
 
-// BPM detection — realtime-bpm-analyzer wraps an AudioWorkletNode. We connect
-// the active source to its `.node` as a parallel sink (the existing
-// source→analyser→destination chain still drives audio). Worklet creation is
-// async so we cache both the resolved analyzer and the in-flight promise.
+// BPM detection — realtime-bpm-analyzer wraps an AudioWorkletNode. The library
+// recommends pre-filtering to a low-pass band so peak detection sees only the
+// kick/bass region (functionally equivalent to running it at a much lower
+// sample rate). We feed the source through a biquad lowpass before the worklet:
+//   source → bpmFilter → bpmAnalyzer.node → destination
+// Worklet creation is async so we cache both the resolved analyzer and the
+// in-flight promise.
 let bpmAnalyzer: BpmAnalyzer | null = null;
 let bpmAnalyzerPromise: Promise<BpmAnalyzer> | null = null;
-let bpm = 0;          // smoothed locked BPM (0 until first stable estimate)
+let bpmFilter: BiquadFilterNode | null = null;
+let bpm = 0;          // locked BPM (0 until first stable estimate)
 let bpmCandidate = 0; // most recent top candidate (early-feedback display)
 let bassEnergy = 0;   // mean of low-band FFT bins (drives bloom pulse)
 let lastBpmSourceNode: AudioNode | null = null; // tracked separately so we
-// can disconnect it from bpmAnalyzer.node without touching the analyser path.
+// can disconnect it from bpmFilter without touching the analyser path.
 
 function ensureAudio(): { ctx: AudioContext; analyser: AnalyserNode } {
   if (!audioCtx) {
@@ -419,34 +423,46 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
   if (bpmAnalyzer) return bpmAnalyzer;
   if (bpmAnalyzerPromise) return bpmAnalyzerPromise;
   const { ctx } = ensureAudio();
-  // continuousAnalysis: keep updating after the first stable lock so the
-  // readout keeps moving when tempo changes mid-track.
-  bpmAnalyzerPromise = createRealtimeBpmAnalyzer(ctx, { continuousAnalysis: true }).then((a) => {
+  // 200 Hz lowpass, Q=1 — focus the analyzer on kick/bass transients, ignore
+  // hi-hats/cymbals/vocals that confuse peak detection.
+  bpmFilter = getBiquadFilter(ctx);
+  // continuousAnalysis: false — lock once and hold. Stops the readout from
+  // wobbling on tracks where the analyzer's confidence drifts. Source change
+  // calls bpmAnalyzer.reset() to re-analyze.
+  bpmAnalyzerPromise = createRealtimeBpmAnalyzer(ctx, { continuousAnalysis: false }).then((a) => {
+    bpmFilter!.connect(a.node);
+    // Connect the worklet's output to destination so Chrome doesn't prune it
+    // from the graph. The processor doesn't write outputs (process() only
+    // reads inputs), so the AudioWorkletNode emits zero samples — silent.
+    a.node.connect(ctx.destination);
+
     a.on('bpm', (data) => {
       const top = data.bpm[0];
       if (top) bpmCandidate = top.tempo;
     });
     a.on('bpmStable', (data) => {
       const top = data.bpm[0];
-      if (!top) return;
-      // First stable lock: snap directly. Subsequent stables: gentle smoothing
-      // to avoid jumps when the analyzer briefly disagrees with itself.
-      bpm = bpm === 0 ? top.tempo : bpm + (top.tempo - bpm) * 0.5;
+      if (top) bpm = top.tempo; // snap; we lock once, no smoothing needed
     });
     a.on('error', (e) => {
       console.error('[bpm] analyzer error:', e);
     });
-    // Connect the worklet's output to destination so Chrome doesn't prune it
-    // from the graph. The processor doesn't write outputs (process() only
-    // reads inputs), so the AudioWorkletNode emits zero samples — silent.
-    a.node.connect(ctx.destination);
+
     bpmAnalyzer = a;
-    // expose for ad-hoc DevTools poking
+    // expose for ad-hoc DevTools poking + filter tuning
     (window as unknown as { __terrain?: unknown }).__terrain = {
-      ctx, analyser, fftBins, bpmAnalyzer: a,
+      ctx, analyser, fftBins, bpmAnalyzer: a, bpmFilter,
       get bpm() { return bpm; },
       get bpmCandidate() { return bpmCandidate; },
       get bassEnergy() { return bassEnergy; },
+      // tweak filter on the fly: __terrain.setFilter(150, 0.7)
+      setFilter(freq: number, q: number) {
+        if (bpmFilter) {
+          bpmFilter.frequency.value = freq;
+          bpmFilter.Q.value = q;
+        }
+      },
+      resetBpm() { bpm = 0; bpmCandidate = 0; a.reset(); },
     };
     return a;
   }).catch((err) => {
@@ -458,13 +474,18 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
 
 function connectBpmSource(src: AudioNode) {
   ensureBpm().then((a) => {
-    if (!a) return;
-    // disconnect previous parallel sink to avoid double-counting
+    if (!a || !bpmFilter) return;
+    // disconnect previous source from the filter input
     if (lastBpmSourceNode) {
-      try { lastBpmSourceNode.disconnect(a.node); } catch {}
+      try { lastBpmSourceNode.disconnect(bpmFilter); } catch {}
     }
-    src.connect(a.node);
+    src.connect(bpmFilter);
     lastBpmSourceNode = src;
+    // fresh source — clear any prior lock and reset the analyzer's internal
+    // peak buffer so the new audio gets analyzed from scratch.
+    bpm = 0;
+    bpmCandidate = 0;
+    a.reset();
   });
 }
 
@@ -473,8 +494,8 @@ function disconnectCurrent() {
     try { currentSourceNode.disconnect(); } catch {}
     currentSourceNode = null;
   }
-  // currentSourceNode.disconnect() above already severs the bpm-sink link
-  // since it's a no-arg disconnect — clear the cached ref so the next
+  // currentSourceNode.disconnect() above already severs the source→bpmFilter
+  // link since it's a no-arg disconnect — clear the cached ref so the next
   // connectBpmSource doesn't try to undo a connection that's already gone.
   lastBpmSourceNode = null;
   if (micStream) {
