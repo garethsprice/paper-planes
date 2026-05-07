@@ -870,6 +870,7 @@ const CAM_MODES: CamMode[] = [
 let currentCamModeIdx = 0;
 let camModeChangedAt = 0;       // ms timestamp of last cam switch
 let camBeatsAtChange = 0;       // beatCount snapshot at last cam switch
+let cinematicAuto = true;       // toggle with 'V' — when off, stays on current mode
 let beatCount = 0;
 
 // ----- keyboard shortcuts -----
@@ -906,6 +907,12 @@ document.addEventListener('keydown', (e) => {
       camModeChangedAt = performance.now();
       camBeatsAtChange = beatCount;
       statusEl.textContent = `cam: ${CAM_MODES[currentCamModeIdx].label}`;
+      break;
+    case 'v':
+      cinematicAuto = !cinematicAuto;
+      camModeChangedAt = performance.now();
+      camBeatsAtChange = beatCount;
+      statusEl.textContent = `cinematic ${cinematicAuto ? 'on' : 'off'}`;
       break;
   }
 });
@@ -988,9 +995,9 @@ function animate() {
   }
   for (const ship of ships) updateShip(ship, dt, t, level, centroid);
 
-  // auto-advance camera mode every 8 beats (BPM-locked) or 8 s fallback.
-  // (beats-since-switch comparison; absolute beatCount × idx wraps and jitters.)
-  {
+  // auto-advance camera mode every 8 beats (BPM-locked) or 8 s fallback —
+  // only when cinematic auto-cycle is on. 'V' toggles, 'C' jumps regardless.
+  if (cinematicAuto) {
     const beatsPerSwitch = 8;
     const fallbackMs = 8000;
     const ready = bpm > 0
