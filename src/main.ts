@@ -557,6 +557,7 @@ async function ensureBpm(): Promise<BpmAnalyzer | null> {
       if (now - lastPeakAt > 250) {
         beatPulse = 1.0;
         lastPeakAt = now;
+        beatCount++;
       }
     });
 
@@ -794,6 +795,19 @@ canvas.addEventListener('click', () => {
   micBtn.click();
 });
 
+// ----- cinematic auto-cam — cycles between presets on bar boundaries -----
+type CamPreset = { yaw: number; pitch: number; radius: number; height: number };
+const CAM_PRESETS: CamPreset[] = [
+  { yaw: 0,         pitch: 0.0,  radius: 28, height: 9  }, // default eye-level
+  { yaw: 0.6,       pitch: 0.25, radius: 32, height: 14 }, // 3/4 high-side
+  { yaw: -0.5,      pitch: -0.1, radius: 22, height: 6  }, // low chase from left
+  { yaw: Math.PI,   pitch: 0.35, radius: 36, height: 18 }, // overhead reverse
+];
+let cinematicMode = false;
+let cinematicPresetIdx = 0;
+let cinematicPresetAt = 0;
+let beatCount = 0;
+
 // ----- keyboard shortcuts -----
 document.addEventListener('keydown', (e) => {
   // ignore key events fired inside form fields
@@ -818,6 +832,11 @@ document.addEventListener('keydown', (e) => {
         bpmAnalyzer.reset();
         statusEl.textContent = 'bpm reset';
       }
+      break;
+    case 'c':
+      cinematicMode = !cinematicMode;
+      cinematicPresetAt = performance.now();
+      statusEl.textContent = `cinematic ${cinematicMode ? 'on' : 'off'}`;
       break;
   }
 });
@@ -900,14 +919,33 @@ function animate() {
   }
   for (const ship of ships) updateShip(ship, dt, t, level, centroid);
 
+  // cinematic mode advances the active preset every 8 beats (one bar at 4/4
+  // taken twice) when BPM is locked, or every 8 seconds otherwise. The user's
+  // pointer drag still feeds targetYaw/pitch — we just override them here.
+  if (cinematicMode) {
+    const beatsPerSwitch = 8;
+    const fallbackMs = 8000;
+    const ready = bpm > 0
+      ? beatCount - cinematicPresetIdx * beatsPerSwitch >= beatsPerSwitch
+      : performance.now() - cinematicPresetAt >= fallbackMs;
+    if (ready) {
+      cinematicPresetIdx = (cinematicPresetIdx + 1) % CAM_PRESETS.length;
+      cinematicPresetAt = performance.now();
+    }
+    const p = CAM_PRESETS[cinematicPresetIdx];
+    targetYaw = p.yaw;
+    targetPitch = p.pitch;
+  }
+
   // damped orbit + bass-driven push-in
   yaw += (targetYaw - yaw) * 0.08;
   pitch += (targetPitch - pitch) * 0.08;
-  const radius = 28 - bassEnergy * 2.5;        // pulls in on heavy bass
-  const baseHeight = 9;
+  const presetRadius = cinematicMode ? CAM_PRESETS[cinematicPresetIdx].radius : 28;
+  const presetHeight = cinematicMode ? CAM_PRESETS[cinematicPresetIdx].height : 9;
+  const radius = presetRadius - bassEnergy * 2.5; // pulls in on heavy bass
   camera.position.x = Math.sin(yaw) * radius;
   camera.position.z = Math.cos(yaw) * radius;
-  camera.position.y = baseHeight + pitch * 12;
+  camera.position.y = presetHeight + pitch * 12;
   camera.lookAt(0, 1.5, 0);
 
   // beat pulse breathes the whole landscape vertically
