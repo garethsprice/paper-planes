@@ -92,3 +92,17 @@ html, body {
   /* JS drives opacity per frame — disable transitions to avoid lag/jitter */
   transition: none;
 }
+#dbg {
+  padding: 4px 8px;
+  border: 1px solid rgba(120, 200, 255, 0.20);
+  border-radius: 3px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: rgba(176, 216, 255, 0.7);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+#dbg .tag { display: inline-block; padding: 0 4px; margin-left: 4px; border-radius: 2px; }
+#dbg .tag.on { background: rgba(120, 200, 255, 0.25); color: #fff; }
+#dbg .tag.drop { background: rgba(255, 120, 200, 0.4); color: #fff; }
+#dbg .num { color: #cfe6ff; }

@@ -25,6 +25,7 @@ const uiEl = document.getElementById('ui') as HTMLDivElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
 const bpmNumEl = document.querySelector('#bpm .num') as HTMLSpanElement;
 const bpmDotEl = document.getElementById('bpm-dot') as HTMLSpanElement;
+const dbgEl = document.getElementById('dbg') as HTMLSpanElement;
 
 // ----- three.js core -----
 const scene = new THREE.Scene();
@@ -1025,6 +1026,7 @@ const markInteraction = () => { lastInteractionAt = performance.now(); };
 // ----- drop response: per-event side effects, fired once when dropCount advances -----
 let lastSeenDropCount = 0;
 let dropFovOverlayUntil = 0; // ms timestamp; FOV widens until this time
+let dbgFrameCounter = 0;     // throttles debug-panel DOM rebuilds
 
 function onDrop() {
   // Formation flight for ~6 seconds (≈8 bars at 120 BPM, 4 bars at 60 BPM —
@@ -1308,6 +1310,21 @@ function animate() {
     : bpmCandidate > 0
       ? `~${Math.round(bpmCandidate)} bpm`
       : '— bpm';
+
+  // debug status panel — live read of dynamics + active modes. Rebuilt
+  // every 6 frames (~10 Hz) to keep DOM churn out of the hot path while
+  // staying snappy enough that drops are visible.
+  if ((dbgFrameCounter++ % 6) === 0) {
+    dbgEl.innerHTML =
+      `<span class="num">I ${dynamics.intensity.toFixed(2)}</span>` +
+      `<span class="num"> · B ${dynamics.build.toFixed(2)}</span>` +
+      (dynamics.quiet ? '<span class="tag on"> QUIET</span>' : '') +
+      (dropBoost > 0.05
+        ? `<span class="tag drop"> DROP×${dynamics.dropCount}</span>`
+        : ` <span style="opacity:0.5">drp ${dynamics.dropCount}</span>`) +
+      (formation.active ? '<span class="tag on"> FORM</span>' : '') +
+      (dynamics.build > 0.3 ? '<span class="tag on"> BUILD</span>' : '');
+  }
 
   composer.render(dt);
 }
