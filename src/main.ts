@@ -40,17 +40,27 @@ const renderer = new THREE.WebGLRenderer({
   antialias: true,
   powerPreference: 'high-performance',
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// DPR cap of 1.5 (was 2): on HiDPI screens this halves per-pixel fragment
+// work vs an uncapped 2.0 with negligible visual cost on glow-heavy lines.
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.95;
 
 // ----- post-processing (bloom for the Tron-grid glow) -----
+// Bloom resolution is the dominant GPU cost (5-mip pyramid × 2 blurs each).
+// Pass half the canvas size so the internal pyramid is quarter-area —
+// bloom is intrinsically blurry, the difference is barely visible.
+const BLOOM_DIVISOR = 2;
+const bloomRes = new THREE.Vector2(
+  window.innerWidth / BLOOM_DIVISOR,
+  window.innerHeight / BLOOM_DIVISOR,
+);
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.85, // strength
+  bloomRes,
+  0.65, // strength (was 0.85; lower-res RT needs less amplification)
   0.55, // radius
   0.05, // threshold
 );
@@ -104,7 +114,9 @@ const uniforms = {
 
 const material = new THREE.ShaderMaterial({
   uniforms,
-  transparent: true,
+  // alpha is always 1 in the fragment shader — keep this opaque so three.js
+  // can write depth and skip the per-frame transparent-object sort.
+  transparent: false,
   vertexShader: /* glsl */ `
     varying float vHeight;
     varying float vViewDist;
@@ -403,13 +415,18 @@ function disconnectCurrent() {
   }
 }
 
+let currentObjectUrl: string | null = null;
 fileInput.addEventListener('change', () => {
   const f = fileInput.files?.[0];
   if (!f) return;
   const { ctx, analyser } = ensureAudio();
   disconnectCurrent();
   audioEl.pause();
-  audioEl.src = URL.createObjectURL(f);
+  // Free the previous blob URL — otherwise the prior File stays alive in
+  // memory for the lifetime of the page.
+  if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+  currentObjectUrl = URL.createObjectURL(f);
+  audioEl.src = currentObjectUrl;
   audioEl.load();
   // MediaElementAudioSourceNode can only be created once per element; cache it.
   let mediaSrc = (audioEl as any).__src as MediaElementAudioSourceNode | undefined;
@@ -519,6 +536,9 @@ const ROW_STRIDE_FRONT = (ROWS - 1) * COLS; // newest row offset in heights[]
 
 function animate() {
   requestAnimationFrame(animate);
+  // Skip all per-frame work when the tab is hidden — browsers throttle rAF to
+  // 1Hz here anyway, but this prevents stale dt jumps on tab refocus.
+  if (document.hidden) return;
   const dt = clock.getDelta();
   const t = clock.getElapsedTime();
   uniforms.uTime.value = t;
@@ -587,5 +607,6 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
   composer.setSize(w, h);
-  bloom.setSize(w, h);
+  // Match the BLOOM_DIVISOR-reduced bloom resolution.
+  bloom.setSize(w / BLOOM_DIVISOR, h / BLOOM_DIVISOR);
 });
