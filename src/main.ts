@@ -3,6 +3,8 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { AfterimagePass } from 'three/examples/jsm/postprocessing/AfterimagePass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { createNoise3D } from 'simplex-noise';
 import { createRealtimeBpmAnalyzer, getBiquadFilter, type BpmAnalyzer } from 'realtime-bpm-analyzer';
 
@@ -70,6 +72,38 @@ const bloom = new UnrealBloomPass(
   0.05, // threshold
 );
 composer.addPass(bloom);
+
+// Afterimage (feedback motion blur): every bright pixel leaves a fading ghost.
+// damp closer to 1 = longer trails; bass-modulated in animate().
+const afterimagePass = new AfterimagePass(0.93);
+composer.addPass(afterimagePass);
+
+// Chromatic aberration: subtle radial RGB split, expands on bass.
+const ChromaticAberrationShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uAmount: { value: 0.002 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uAmount;
+    varying vec2 vUv;
+    void main() {
+      vec2 dir = vUv - 0.5;
+      float r = texture2D(tDiffuse, vUv - dir * uAmount).r;
+      float g = texture2D(tDiffuse, vUv).g;
+      float b = texture2D(tDiffuse, vUv + dir * uAmount).b;
+      gl_FragColor = vec4(r, g, b, 1.0);
+    }
+  `,
+};
+const chromaticPass = new ShaderPass(ChromaticAberrationShader);
+composer.addPass(chromaticPass);
+
 composer.addPass(new OutputPass());
 
 // ----- terrain geometry: a regular grid drawn as line segments -----
@@ -108,7 +142,11 @@ geometry.setIndex(lineIndex);
 geometry.computeBoundingSphere();
 
 // ----- shader material: height→color, fog, distance fade -----
-const uniforms = {
+// Shared uniform refs — both the real and mirror materials see the SAME
+// {value:...} objects for everything except uOpacity. JS-side updates to
+// uTime/uHeightMul/uHueShift propagate to both meshes via shared reference.
+// (Don't reassign material.uniforms.X = {value:...}; mutate .value only.)
+const sharedUniforms = {
   uTime: { value: 0 },
   uFogNear: { value: fog.near },
   uFogFar: { value: fog.far },
@@ -116,100 +154,127 @@ const uniforms = {
   uHeightScale: { value: HEIGHT_SCALE },
   uDepthHalf: { value: DEPTH * 0.5 },
   uHeightMul: { value: 1.0 },  // beat-pulse pumps the whole landscape vertically
-  uHueShift: { value: 0.0 },   // BPM-driven hue rotation in [-0.05, +0.05] turns
+  uHueShift: { value: 0.0 },   // BPM-driven hue rotation
+};
+const uniforms = {
+  ...sharedUniforms,
+  uOpacity: { value: 1.0 },
 };
 
+const TERRAIN_VERTEX_SHADER = /* glsl */ `
+  varying float vHeight;
+  varying float vViewDist;
+  varying float vRowAge;
+  varying vec2 vWorldXZ;
+  uniform float uDepthHalf;
+  uniform float uHeightMul;
+
+  void main() {
+    vec3 p = vec3(position.x, position.y * uHeightMul, position.z);
+    vHeight = p.y;
+    vWorldXZ = vec2(position.x, position.z); // grid has no x/z transform — local == world
+    // rowAge: 0 at front (newest) → 1 at back (oldest)
+    vRowAge = clamp((uDepthHalf - p.z) / (uDepthHalf * 2.0), 0.0, 1.0);
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    vViewDist = -mv.z;
+    gl_Position = projectionMatrix * mv;
+  }
+`;
 const material = new THREE.ShaderMaterial({
   uniforms,
-  // alpha is always 1 in the fragment shader — keep this opaque so three.js
-  // can write depth and skip the per-frame transparent-object sort.
-  transparent: false,
-  vertexShader: /* glsl */ `
-    varying float vHeight;
-    varying float vViewDist;
-    varying float vRowAge;
-    uniform float uDepthHalf;
-    uniform float uHeightMul;
+  transparent: false, // depth writes preserved on the real grid
+  vertexShader: TERRAIN_VERTEX_SHADER,
+  fragmentShader: '',
+});
+const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
+  varying float vHeight;
+  varying float vViewDist;
+  varying float vRowAge;
+  varying vec2 vWorldXZ;
+  uniform float uTime;
+  uniform float uFogNear;
+  uniform float uFogFar;
+  uniform vec3 uFogColor;
+  uniform float uHeightScale;
+  uniform float uHueShift;
+  uniform float uOpacity;
 
-    void main() {
-      vec3 p = vec3(position.x, position.y * uHeightMul, position.z);
-      vHeight = p.y;
-      // rowAge: 0 at front (newest) → 1 at back (oldest)
-      vRowAge = clamp((uDepthHalf - p.z) / (uDepthHalf * 2.0), 0.0, 1.0);
-      vec4 mv = modelViewMatrix * vec4(p, 1.0);
-      vViewDist = -mv.z;
-      gl_Position = projectionMatrix * mv;
+  // cool → hot gradient
+  vec3 grade(float t) {
+    vec3 c0 = vec3(0.02, 0.05, 0.18);
+    vec3 c1 = vec3(0.05, 0.30, 0.75);
+    vec3 c2 = vec3(0.10, 0.85, 0.95);
+    vec3 c3 = vec3(0.95, 0.25, 0.60);
+    vec3 c4 = vec3(1.00, 0.65, 0.20);
+    vec3 c5 = vec3(1.00, 0.98, 0.85);
+    if (t < 0.2)  return mix(c0, c1, t / 0.2);
+    if (t < 0.45) return mix(c1, c2, (t - 0.2) / 0.25);
+    if (t < 0.7)  return mix(c2, c3, (t - 0.45) / 0.25);
+    if (t < 0.88) return mix(c3, c4, (t - 0.7) / 0.18);
+    return mix(c4, c5, (t - 0.88) / 0.12);
+  }
+
+  vec3 rgb2hsv(vec3 c) {
+    vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+    vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+    vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+  }
+  vec3 hsv2rgb(vec3 c) {
+    vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+  }
+
+  void main() {
+    float h = clamp(vHeight / uHeightScale, 0.0, 1.0);
+    vec3 col = grade(h);
+
+    // brightness boost on peaks → bloom catches them
+    col *= 0.8 + 1.6 * h;
+
+    // iridescent hue: BPM offset + position+time noise (oil-slick shimmer)
+    float hueNoise =
+      sin(vWorldXZ.x * 0.18 + uTime * 0.30) *
+      cos(vWorldXZ.y * 0.18 + uTime * 0.22) * 0.06;
+    float totalHue = uHueShift + hueNoise;
+    if (abs(totalHue) > 0.001) {
+      vec3 hsv = rgb2hsv(col);
+      hsv.x = fract(hsv.x + totalHue);
+      col = hsv2rgb(hsv);
     }
-  `,
-  fragmentShader: /* glsl */ `
-    varying float vHeight;
-    varying float vViewDist;
-    varying float vRowAge;
-    uniform float uFogNear;
-    uniform float uFogFar;
-    uniform vec3 uFogColor;
-    uniform float uHeightScale;
-    uniform float uHueShift;
 
-    // cool → hot gradient
-    vec3 grade(float t) {
-      vec3 c0 = vec3(0.02, 0.05, 0.18);  // near-black blue
-      vec3 c1 = vec3(0.05, 0.30, 0.75);  // electric blue
-      vec3 c2 = vec3(0.10, 0.85, 0.95);  // cyan
-      vec3 c3 = vec3(0.95, 0.25, 0.60);  // magenta
-      vec3 c4 = vec3(1.00, 0.65, 0.20);  // orange
-      vec3 c5 = vec3(1.00, 0.98, 0.85);  // hot white
-      if (t < 0.2)  return mix(c0, c1, t / 0.2);
-      if (t < 0.45) return mix(c1, c2, (t - 0.2) / 0.25);
-      if (t < 0.7)  return mix(c2, c3, (t - 0.45) / 0.25);
-      if (t < 0.88) return mix(c3, c4, (t - 0.7) / 0.18);
-      return mix(c4, c5, (t - 0.88) / 0.12);
-    }
+    // fade old rows toward black for depth
+    float ageFade = 1.0 - smoothstep(0.55, 1.0, vRowAge);
+    col *= ageFade;
 
-    // RGB↔HSV for hue rotation. Standard GLSL snippet, public-domain.
-    vec3 rgb2hsv(vec3 c) {
-      vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
-      vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
-      vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
-      float d = q.x - min(q.w, q.y);
-      float e = 1.0e-10;
-      return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
-    }
-    vec3 hsv2rgb(vec3 c) {
-      vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
-      vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-      return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-    }
+    // distance fog
+    float fogF = smoothstep(uFogNear, uFogFar, vViewDist);
+    col = mix(col, uFogColor, fogF);
 
-    void main() {
-      float h = clamp(vHeight / uHeightScale, 0.0, 1.0);
-      vec3 col = grade(h);
+    gl_FragColor = vec4(col, uOpacity);
+  }
+`;
+material.fragmentShader = TERRAIN_FRAGMENT_SHADER;
+material.needsUpdate = true;
 
-      // subtle brightness boost on peaks → bloom catches them
-      col *= 0.8 + 1.6 * h;
-
-      // BPM-driven hue rotation
-      if (abs(uHueShift) > 0.001) {
-        vec3 hsv = rgb2hsv(col);
-        hsv.x = fract(hsv.x + uHueShift);
-        col = hsv2rgb(hsv);
-      }
-
-      // fade old rows toward black for depth
-      float ageFade = 1.0 - smoothstep(0.55, 1.0, vRowAge);
-      col *= ageFade;
-
-      // distance fog
-      float fogF = smoothstep(uFogNear, uFogFar, vViewDist);
-      col = mix(col, uFogColor, fogF);
-
-      gl_FragColor = vec4(col, 1.0);
-    }
-  `,
+// ----- mirror world: same geometry/shader, flipped Y, dimmer -----
+const mirrorMaterial = new THREE.ShaderMaterial({
+  uniforms: { ...sharedUniforms, uOpacity: { value: 0.32 } },
+  vertexShader: TERRAIN_VERTEX_SHADER,
+  fragmentShader: TERRAIN_FRAGMENT_SHADER,
+  transparent: true,
+  depthWrite: false, // don't occlude the real terrain
 });
 
 const grid = new THREE.LineSegments(geometry, material);
 scene.add(grid);
+
+const mirrorGrid = new THREE.LineSegments(geometry, mirrorMaterial);
+mirrorGrid.scale.y = -1; // reflects the terrain straight down through the y=0 plane
+scene.add(mirrorGrid);
 
 // ----- star field — points at far radius, slow rotation for parallax -----
 const stars = (() => {
@@ -239,6 +304,37 @@ const stars = (() => {
   const s = new THREE.Points(starGeom, starMat);
   scene.add(s);
   return s;
+})();
+
+// ----- particle nebula — soft glowing dots between camera and terrain -----
+const nebula = (() => {
+  const N = 400;
+  const positions = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    // cylindrical region: radius 8-30, mid-altitude, bias slightly toward
+    // foreground so the haze layers in front of the spectrogram.
+    const theta = Math.random() * Math.PI * 2;
+    const r = 8 + Math.random() * 22;
+    const y = 1.5 + Math.random() * 16;
+    positions[i * 3]     = Math.cos(theta) * r;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = Math.sin(theta) * r;
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 1.3,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.32,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    fog: true,
+    color: 0x80b8ff,
+  });
+  const p = new THREE.Points(geom, mat);
+  scene.add(p);
+  return p;
 })();
 
 // ----- ship: Asteroids-style triangle, autopiloted with a simple flight model -----
@@ -757,10 +853,18 @@ function sampleLogBin(data: { length: number; [i: number]: number }, fbin: numbe
 }
 
 // ----- mouse orbit (subtle, custom) -----
+// Spring physics on yaw/pitch: critically-underdamped → slight overshoot when
+// targets change (manual drag end, cinematic preset switch, bass impulse).
 let yaw = 0;
 let pitch = 0;
+let yawVel = 0;
+let pitchVel = 0;
+let prevBassForSpring = 0;
 let targetYaw = 0;
 let targetPitch = 0;
+const CAM_STIFFNESS = 50;
+const CAM_DAMPING = 9;
+const CAM_BASS_IMPULSE = 0.6;
 let dragging = false;
 let lastX = 0;
 let lastY = 0;
@@ -943,9 +1047,17 @@ function animate() {
     targetPitch = p.pitch;
   }
 
-  // damped orbit + bass-driven push-in
-  yaw += (targetYaw - yaw) * 0.08;
-  pitch += (targetPitch - pitch) * 0.08;
+  // spring orbit: critically-underdamped, with a kick on bass attacks so the
+  // camera breathes with the music instead of just snapping to targets.
+  const bassDelta = bassEnergy - prevBassForSpring;
+  prevBassForSpring = bassEnergy;
+  if (bassDelta > 0.05) yawVel += bassDelta * CAM_BASS_IMPULSE;
+  const yawAccel = (targetYaw - yaw) * CAM_STIFFNESS - yawVel * CAM_DAMPING;
+  yawVel += yawAccel * dt;
+  yaw += yawVel * dt;
+  const pitchAccel = (targetPitch - pitch) * CAM_STIFFNESS - pitchVel * CAM_DAMPING;
+  pitchVel += pitchAccel * dt;
+  pitch += pitchVel * dt;
   const presetRadius = cinematicMode ? CAM_PRESETS[cinematicPresetIdx].radius : 28;
   const presetHeight = cinematicMode ? CAM_PRESETS[cinematicPresetIdx].height : 9;
   const radius = presetRadius - bassEnergy * 2.5; // pulls in on heavy bass
@@ -958,18 +1070,31 @@ function animate() {
   uniforms.uHeightMul.value = 1.0 + beatPulse * 0.10;
   // very subtle star parallax
   stars.rotation.y += 0.0003;
+  // nebula rotates faster than stars; bass drops accelerate the swirl
+  nebula.rotation.y += 0.0008 + bassEnergy * 0.004;
+  // recolor by spectral centroid: bass-heavy → cool blue, treble-heavy → warm pink
+  (nebula.material as THREE.PointsMaterial).color.setRGB(
+    0.45 + centroid * 0.55,
+    0.55 + 0.10 * (1 - centroid),
+    0.95 - centroid * 0.30,
+  );
 
   // UI auto-hide
   const idle = performance.now() - lastInteractionAt > 3000;
   if (idle !== uiEl.classList.contains('idle')) {
     uiEl.classList.toggle('idle', idle);
   }
-  // hue rotates with locked BPM: 60 → -0.05 turns (cooler), 180 → +0.05 turns (warmer)
+  // hue: BPM offset + slow time cycle. Per-pixel iridescent shimmer is added
+  // in the fragment shader on top of this base value (using uTime).
   const tempoForHue = bpm > 0 ? bpm : 120;
-  uniforms.uHueShift.value = Math.max(-0.05, Math.min(0.05, (tempoForHue - 120) / 60 * 0.05));
+  const bpmHue = Math.max(-0.05, Math.min(0.05, (tempoForHue - 120) / 60 * 0.05));
+  uniforms.uHueShift.value = bpmHue + Math.sin(t * 0.07) * 0.04;
 
   // bloom kick on bass transients (decoupled from BPM lock — reacts to energy)
   bloom.strength = 0.65 + bassEnergy * 0.5;
+  // afterimage damp + chromatic aberration both pulse with bass
+  afterimagePass.uniforms.damp.value = 0.93 + bassEnergy * 0.04;
+  chromaticPass.uniforms.uAmount.value = Math.min(0.008, 0.0015 + bassEnergy * 0.006);
 
   // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
   beatPulse *= Math.exp(-9 * dt); // visible for ~150ms after each peak
