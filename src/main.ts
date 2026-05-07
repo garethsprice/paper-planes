@@ -1016,11 +1016,19 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ----- UI auto-hide after 3 s of no interaction -----
+// ----- UI auto-hide: show while pointer is in the window, fade 3 s after it leaves
 let lastInteractionAt = performance.now();
+let pointerInWindow = false;
 const markInteraction = () => { lastInteractionAt = performance.now(); };
 ['pointermove', 'pointerdown', 'keydown', 'wheel'].forEach((ev) => {
   document.addEventListener(ev, markInteraction, { passive: true });
+});
+// pointerenter/leave on body track whether the cursor is inside the window —
+// while it's inside, the UI never hides; 3 s after it leaves it fades out.
+document.body.addEventListener('pointerenter', () => { pointerInWindow = true; });
+document.body.addEventListener('pointerleave', () => {
+  pointerInWindow = false;
+  lastInteractionAt = performance.now(); // reset countdown from leave time
 });
 
 // ----- drop response: per-event side effects, fired once when dropCount advances -----
@@ -1282,8 +1290,8 @@ function animate() {
     0.95 - centroid * 0.30,
   );
 
-  // UI auto-hide
-  const idle = performance.now() - lastInteractionAt > 3000;
+  // UI auto-hide: never idle while pointer is over the window
+  const idle = !pointerInWindow && performance.now() - lastInteractionAt > 3000;
   if (idle !== uiEl.classList.contains('idle')) {
     uiEl.classList.toggle('idle', idle);
   }
