@@ -180,7 +180,7 @@ const SHIP_Z_CENTER = (SHIP_Z_MIN + SHIP_Z_MAX) * 0.5;
 const SHIP_Y_MIN = 1.4;
 const SHIP_Y_MAX = HEIGHT_SCALE * 1.5 + 1;
 const SHIP_CLEARANCE = 1.5;       // soft clearance above forward-sampled terrain
-const SHIP_HARD_CLEAR = 0.7;      // hard collision safety margin
+const SHIP_HARD_CLEAR = 0.95;     // hard collision safety margin (clears keel)
 const SHIP_LOOKAHEAD_DIST = 5.0;  // world units ahead to sample for altitude
 const SHIP_BASE_SPEED = 8;        // units/sec at idle
 const SHIP_SPEED_BOOST = 14;      // additional with full bass
@@ -194,15 +194,32 @@ const SHIP_PITCH_GAIN = 0.06;     // pitch per (unit/sec) of climb rate
 
 const shipGeom = new THREE.BufferGeometry();
 {
+  // Wedge with a sharp nose: the existing flat triangle on top, plus a
+  // single keel-tail vertex at the back-bottom. The "line down the middle"
+  // is now a diagonal from the nose tapering down-and-back to the keel-tail
+  // — looks more aerodynamic, like an arrowhead. Back keeps its height.
   const s = 1.1;
+  const k = 0.7; // back-keel depth
   const v = new Float32Array([
-    0,         0, -1.3 * s,  // 0: nose (pointing local -Z)
-    -0.75 * s, 0,  0.85 * s, // 1: back-left
-    0,         0,  0.45 * s, // 2: back-notch (Asteroids tail dimple)
-    0.75 * s,  0,  0.85 * s, // 3: back-right
+    // top (Asteroids triangle outline)
+    0,         0,  -1.3 * s,  // 0: nose (single sharp point)
+    -0.75 * s, 0,   0.85 * s, // 1: back-left wing
+    0,         0,   0.45 * s, // 2: back-notch (top of rear face)
+    0.75 * s,  0,   0.85 * s, // 3: back-right wing
+    // keel — only at the back; tapers to the nose point
+    0,        -k,   0.45 * s, // 4: keel-tail (bottom of rear face)
   ]);
   shipGeom.setAttribute('position', new THREE.BufferAttribute(v, 3));
-  shipGeom.setIndex([0, 1, 1, 2, 2, 3, 3, 0]);
+  shipGeom.setIndex([
+    // top outline
+    0, 1,  1, 2,  2, 3,  3, 0,
+    // diagonal belly seam: nose tapers down to the back keel
+    0, 4,
+    // rear vertical (notch ↔ keel-tail) — gives the back its height
+    2, 4,
+    // wing tips drop to the keel — defines the side panels
+    1, 4,  3, 4,
+  ]);
 }
 const shipMat = new THREE.LineBasicMaterial({ color: 0xeaffff, fog: false });
 const shipMesh = new THREE.LineSegments(shipGeom, shipMat);
