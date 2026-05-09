@@ -61,6 +61,11 @@ html, body {
   opacity: 0.4;
   cursor: not-allowed;
 }
+.btn.on {
+  background: rgba(80, 160, 240, 0.55);
+  border-color: rgba(200, 235, 255, 0.85);
+  color: #fff;
+}
 #status {
   margin-left: 4px;
   opacity: 0.7;

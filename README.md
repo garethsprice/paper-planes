@@ -32,6 +32,8 @@ Since I was a kid I've watched something like this in my head whenever I've list
 | **V** | toggle cinematic auto-advance |
 | **B** | toggle bloom |
 | **N** | toggle particle nebula |
+| **3** | toggle side-by-side stereo (for AR glasses that split the screen) |
+| **[** / **]** | nudge stereo eye separation |
 | **F** | fullscreen |
 | **R** | reset BPM lock |
 

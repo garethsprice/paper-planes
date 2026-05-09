@@ -21,6 +21,7 @@ const fileInput = document.getElementById('file') as HTMLInputElement;
 const playBtn = document.getElementById('play') as HTMLButtonElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
 const tabBtn = document.getElementById('tab') as HTMLButtonElement;
+const stereoBtn = document.getElementById('stereo') as HTMLButtonElement;
 const uiEl = document.getElementById('ui') as HTMLDivElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
 const bpmNumEl = document.querySelector('#bpm .num') as HTMLSpanElement;
@@ -41,6 +42,16 @@ const camera = new THREE.PerspectiveCamera(
 );
 camera.position.set(0, 9, 26);
 camera.lookAt(0, 0, 0);
+
+// ----- stereo camera for side-by-side AR-glasses output -----
+// StereoCamera derives off-axis cameraL/cameraR from the master each frame.
+// aspect=0.5 because each eye renders into half the canvas width.
+// eyeSep is in world units; scene is ~50u wide, so 0.4 reads as natural depth
+// without crossing-eyes strain. [ / ] keys nudge it.
+const stereoCamera = new THREE.StereoCamera();
+stereoCamera.aspect = 0.5;
+stereoCamera.eyeSep = 0.4;
+let stereoEnabled = false;
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -1013,6 +1024,17 @@ document.addEventListener('keydown', (e) => {
       camBeatsAtChange = beatCount;
       statusEl.textContent = `cinematic ${cinematicAuto ? 'on' : 'off'}`;
       break;
+    case '3':
+      setStereo(!stereoEnabled);
+      break;
+    case '[':
+      stereoCamera.eyeSep = Math.max(0.05, stereoCamera.eyeSep - 0.05);
+      statusEl.textContent = `eyeSep ${stereoCamera.eyeSep.toFixed(2)}`;
+      break;
+    case ']':
+      stereoCamera.eyeSep = Math.min(2.0, stereoCamera.eyeSep + 0.05);
+      statusEl.textContent = `eyeSep ${stereoCamera.eyeSep.toFixed(2)}`;
+      break;
   }
 });
 
@@ -1334,9 +1356,45 @@ function animate() {
       (dynamics.build > 0.3 ? '<span class="tag on"> BUILD</span>' : '');
   }
 
-  composer.render(dt);
+  if (stereoEnabled) {
+    // Side-by-side stereo for AR glasses that split the screen down the
+    // middle. We bypass the EffectComposer because bloom + chromatic
+    // aberration are screen-space — applied across both eyes they would
+    // smear across the divider and break the illusion. Render each eye
+    // directly, scissored to its half of the canvas.
+    scene.updateMatrixWorld();
+    camera.updateMatrixWorld();
+    stereoCamera.update(camera);
+    const size = renderer.getSize(new THREE.Vector2());
+    const halfW = size.x / 2;
+    renderer.setScissorTest(true);
+    renderer.setScissor(0, 0, halfW, size.y);
+    renderer.setViewport(0, 0, halfW, size.y);
+    renderer.render(scene, stereoCamera.cameraL);
+    renderer.setScissor(halfW, 0, halfW, size.y);
+    renderer.setViewport(halfW, 0, halfW, size.y);
+    renderer.render(scene, stereoCamera.cameraR);
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, size.x, size.y);
+  } else {
+    composer.render(dt);
+  }
 }
 animate();
+
+function setStereo(on: boolean) {
+  stereoEnabled = on;
+  stereoBtn.classList.toggle('on', on);
+  // Master camera aspect: stereo uses full canvas with internal 0.5 split,
+  // so the master stays at canvas aspect either way — but we re-derive in
+  // case the next frame is mono.
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  statusEl.textContent = on
+    ? `3d on · eyeSep ${stereoCamera.eyeSep.toFixed(2)} · [ ] to adjust`
+    : '3d off';
+}
+stereoBtn.addEventListener('click', () => setStereo(!stereoEnabled));
 
 // ----- resize -----
 window.addEventListener('resize', () => {
