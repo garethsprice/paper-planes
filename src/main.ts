@@ -43,6 +43,11 @@ const camera = new THREE.PerspectiveCamera(
 camera.position.set(0, 9, 26);
 camera.lookAt(0, 0, 0);
 
+// ----- arrow-key joystick state (used in chase/cockpit only) -----
+// Held while the key is down; cleared on keyup. updateShip overrides the
+// autopilot heading + altitude for the tracked ship when any arrow is held.
+const arrowKeys = { left: false, right: false, up: false, down: false };
+
 // ----- stereo camera for side-by-side AR-glasses output -----
 // StereoCamera derives off-axis cameraL/cameraR from the master each frame.
 // aspect=0.5 because each eye renders into half the canvas width.
@@ -75,12 +80,51 @@ const bloomRes = new THREE.Vector2(
   window.innerHeight / BLOOM_DIVISOR,
 );
 const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene, camera));
+
+// Render pass that switches between mono (master camera) and stereo
+// (cameraL/cameraR side-by-side) on the fly. Stereo writes both eyes into
+// the same RT so subsequent passes (bloom) get one image with the eyes
+// already laid out — bloom smear at the seam is acceptable when the bloom
+// is kept subtle (we drop strength + radius in stereo mode).
+class HybridRenderPass extends RenderPass {
+  override render(
+    renderer: THREE.WebGLRenderer,
+    writeBuffer: THREE.WebGLRenderTarget,
+    readBuffer: THREE.WebGLRenderTarget,
+    deltaTime: number,
+    maskActive: boolean,
+  ): void {
+    if (!stereoEnabled) {
+      super.render(renderer, writeBuffer, readBuffer, deltaTime, maskActive);
+      return;
+    }
+    const target = this.renderToScreen ? null : writeBuffer;
+    renderer.setRenderTarget(target);
+    if (this.clear) renderer.clear();
+    scene.updateMatrixWorld();
+    camera.updateMatrixWorld();
+    stereoCamera.update(camera);
+    const w = target ? target.width : renderer.domElement.width;
+    const h = target ? target.height : renderer.domElement.height;
+    const halfW = (w / 2) | 0;
+    renderer.setScissorTest(true);
+    renderer.setScissor(0, 0, halfW, h);
+    renderer.setViewport(0, 0, halfW, h);
+    renderer.render(scene, stereoCamera.cameraL);
+    renderer.setScissor(halfW, 0, w - halfW, h);
+    renderer.setViewport(halfW, 0, w - halfW, h);
+    renderer.render(scene, stereoCamera.cameraR);
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, w, h);
+  }
+}
+const renderPass = new HybridRenderPass(scene, camera);
+composer.addPass(renderPass);
 const bloom = new UnrealBloomPass(
   bloomRes,
-  0.65, // strength (was 0.85; lower-res RT needs less amplification)
+  0.4,  // strength — animate() rewrites each frame; this is the at-rest value
   0.55, // radius
-  0.05, // threshold
+  0.08, // threshold — slightly higher so only the brightest peaks bloom
 );
 composer.addPass(bloom);
 
@@ -430,6 +474,10 @@ type Ship = {
   wanderSeed: number;
   lastTargetX: number; // last frame's chosen target — leader's value is read by wingmen during formation
   lastTargetZ: number;
+  // Z teleport applied this frame by the tracked-ship wrap-forward logic.
+  // Chase camera adds this to its position before the lerp so the framing
+  // doesn't jolt when the ship hops from front to back of the play area.
+  zWrapDelta: number;
 };
 
 function makeShip(seed: number, x0: number, z0: number): Ship {
@@ -448,6 +496,7 @@ function makeShip(seed: number, x0: number, z0: number): Ship {
     wanderSeed: seed,
     lastTargetX: x0,
     lastTargetZ: z0,
+    zWrapDelta: 0,
   };
 }
 
@@ -510,22 +559,49 @@ function wrapAngle(a: number): number {
   return ((a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
 }
 
-function updateShip(ship: Ship, idx: number, dt: number, time: number, level: number, centroid: number): void {
+function updateShip(ship: Ship, idx: number, dt: number, time: number, level: number, centroid: number, tracked: boolean): void {
   const pos = ship.group.position;
-  // 1. wandering target — slow simplex noise + audio centroid pull
-  const wanderX = noise3(time * 0.07, ship.wanderSeed, 0) * SHIP_X_BOUND;
-  const wanderZ =
-    noise3(time * 0.06, ship.wanderSeed + 100, 0) *
-      (SHIP_Z_MAX - SHIP_Z_MIN) * 0.45 +
-    SHIP_Z_CENTER;
-  const centroidShift = (centroid - 0.5) * 2 * SHIP_X_BOUND * 0.5;
-  let targetX = clamp(wanderX * 0.55 + centroidShift * 0.6, -SHIP_X_BOUND, SHIP_X_BOUND);
-  let targetZ = clamp(wanderZ, SHIP_Z_MIN, SHIP_Z_MAX);
+  // When the camera is locked to this ship (chase/cockpit), fly mostly
+  // straight: target a point far ahead along current heading with only a
+  // small lateral nudge from slow noise. This avoids the constant-spin
+  // motion-sickness problem of full wander chasing.
+  // turnScale controls how fast the ship corrects heading. Lower = calmer
+  // straight-line flight, but also slower to face forward on view entry.
+  // 0.4 strikes a balance — initial 180° turn settles in ~4s, after that
+  // the heading barely moves because the target is nearly aligned.
+  const turnScale = tracked ? 0.4 : 1.0;
+  const bankScale = tracked ? 0.4 : 1.0;
+  let targetX: number;
+  let targetZ: number;
+  if (tracked) {
+    // World-frame forward target: aim toward +Z, where new spectrogram peaks
+    // emerge (the data rolls -Z each frame at ~23 u/s; flying +Z at speed 8
+    // means terrain rushes toward the ship, giving a real "flying forward"
+    // sensation. Flying -Z would let terrain overtake the ship and look
+    // like reverse motion). On view entry this makes the ship turn to face
+    // into the scene; after that it flies mostly straight with a small
+    // lateral drift. Wrap-back (further down) teleports the ship from the
+    // back to the front of the play area so it never has to U-turn.
+    const drift = noise3(time * 0.04, ship.wanderSeed, 0) * 3.0;
+    targetX = clamp(drift, -SHIP_X_BOUND, SHIP_X_BOUND);
+    targetZ = SHIP_Z_MAX + 8; // outside the bounds so heading stays near π
+  } else {
+    // 1. wandering target — slow simplex noise + audio centroid pull
+    const wanderX = noise3(time * 0.07, ship.wanderSeed, 0) * SHIP_X_BOUND;
+    const wanderZ =
+      noise3(time * 0.06, ship.wanderSeed + 100, 0) *
+        (SHIP_Z_MAX - SHIP_Z_MIN) * 0.45 +
+      SHIP_Z_CENTER;
+    const centroidShift = (centroid - 0.5) * 2 * SHIP_X_BOUND * 0.5;
+    targetX = clamp(wanderX * 0.55 + centroidShift * 0.6, -SHIP_X_BOUND, SHIP_X_BOUND);
+    targetZ = clamp(wanderZ, SHIP_Z_MIN, SHIP_Z_MAX);
+  }
 
   // formation override — wingmen blend their target toward (leader + slot).
   // formation.blendIn/Out are eased per-frame in animate(); blend = either
   // direction depending on whether we're entering or exiting formation.
-  if (idx > 0) {
+  // Skip when this ship is being tracked: formation snaps cause sharp turns.
+  if (idx > 0 && !tracked) {
     const blend = formation.active ? formation.blendIn : formation.blendOut;
     if (blend > 0.001) {
       const leader = ships[0];
@@ -539,28 +615,81 @@ function updateShip(ship: Ship, idx: number, dt: number, time: number, level: nu
   ship.lastTargetX = targetX;
   ship.lastTargetZ = targetZ;
 
-  // 2. heading toward target
-  const dx = targetX - pos.x;
-  const dz = targetZ - pos.z;
-  const dist = Math.hypot(dx, dz);
-  let desiredHeading = ship.heading;
-  if (dist > 0.5) desiredHeading = Math.atan2(-dx, -dz);
-  const headingErr = wrapAngle(desiredHeading - ship.heading);
-  const turnInput = clamp(headingErr * SHIP_TURN_GAIN, -1, 1);
-  ship.heading = wrapAngle(ship.heading + turnInput * SHIP_TURN_RATE * dt);
+  // 2. heading toward target — autopilot, unless the player is steering
+  // with the arrow keys in chase/cockpit mode.
+  const playerYaw = tracked
+    ? (arrowKeys.left ? 1 : 0) - (arrowKeys.right ? 1 : 0)
+    : 0;
+  let turnInput: number;
+  if (playerYaw !== 0) {
+    // Joystick: full-rate yaw at the autopilot's relaxed turnScale so the
+    // bank still feels gentle. heading delta uses the full SHIP_TURN_RATE
+    // (not turnScale) so player turns are responsive even though autopilot
+    // is calmed for tracked flight.
+    turnInput = playerYaw;
+    ship.heading = wrapAngle(ship.heading + turnInput * SHIP_TURN_RATE * dt);
+  } else {
+    const dx = targetX - pos.x;
+    const dz = targetZ - pos.z;
+    const dist = Math.hypot(dx, dz);
+    let desiredHeading = ship.heading;
+    if (dist > 0.5) desiredHeading = Math.atan2(-dx, -dz);
+    const headingErr = wrapAngle(desiredHeading - ship.heading);
+    turnInput = clamp(headingErr * SHIP_TURN_GAIN * turnScale, -1, 1);
+    ship.heading = wrapAngle(ship.heading + turnInput * SHIP_TURN_RATE * turnScale * dt);
+  }
 
-  // 3. speed — accelerate toward (base + bass thrust); turning costs speed; beat kick
-  const targetSpeed = SHIP_BASE_SPEED + bassEnergy * SHIP_SPEED_BOOST;
+  // 3. speed
+  let targetSpeed: number;
+  if (tracked) {
+    // Spring the ship's speed toward whatever value keeps it near a home
+    // point inside the play area, applied along the ship's current forward
+    // direction so the spring works whichever way the player has steered.
+    // ship.speed is signed: positive = forward along nose, negative = brief
+    // ebb backward (only when the ship has overshot home in its facing
+    // direction; lets the ship oscillate around home without ever needing
+    // a U-turn or a wrap).
+    const TRACKED_HOME_X = 0;
+    const TRACKED_HOME_Z = SHIP_Z_CENTER;
+    const fwdX_now = -Math.sin(ship.heading);
+    const fwdZ_now = -Math.cos(ship.heading);
+    const homeAhead =
+      (TRACKED_HOME_X - pos.x) * fwdX_now +
+      (TRACKED_HOME_Z - pos.z) * fwdZ_now;
+    const SPRING = 0.85;
+    const audioBoost = bassEnergy * 8 + beatPulse * 3;
+    targetSpeed = homeAhead * SPRING + audioBoost;
+  } else {
+    // accelerate toward (base + bass thrust); turning costs speed; beat kick
+    targetSpeed = SHIP_BASE_SPEED + bassEnergy * SHIP_SPEED_BOOST;
+  }
   ship.speed += (targetSpeed - ship.speed) * SHIP_ACCEL_RATE * dt;
-  const effSpeed =
-    ship.speed * (1 - SHIP_TURN_SLOWDOWN * Math.abs(turnInput))
-    * (1 + beatPulse * 0.45);
+  const effSpeed = tracked
+    ? ship.speed
+    : ship.speed * (1 - SHIP_TURN_SLOWDOWN * Math.abs(turnInput))
+      * (1 + beatPulse * 0.45);
 
   // 4. integrate position
   const fwdX = -Math.sin(ship.heading);
   const fwdZ = -Math.cos(ship.heading);
   pos.x = clamp(pos.x + fwdX * effSpeed * dt, -SHIP_X_BOUND, SHIP_X_BOUND);
-  pos.z = clamp(pos.z + fwdZ * effSpeed * dt, SHIP_Z_MIN, SHIP_Z_MAX);
+  pos.z = pos.z + fwdZ * effSpeed * dt;
+  // Tracked ship wraps Z front-to-back so it never has to U-turn off the
+  // edge. Caller (camera section) shifts the chase camera by the same delta
+  // so the framing doesn't jolt. Untracked ships clamp to the bounds.
+  ship.zWrapDelta = 0;
+  if (tracked) {
+    const wrapSpan = SHIP_Z_MAX - SHIP_Z_MIN;
+    if (pos.z < SHIP_Z_MIN) {
+      pos.z += wrapSpan;
+      ship.zWrapDelta = wrapSpan;
+    } else if (pos.z > SHIP_Z_MAX) {
+      pos.z -= wrapSpan;
+      ship.zWrapDelta = -wrapSpan;
+    }
+  } else {
+    pos.z = clamp(pos.z, SHIP_Z_MIN, SHIP_Z_MAX);
+  }
 
   // 5. altitude
   const aheadX = pos.x + fwdX * SHIP_LOOKAHEAD_DIST;
@@ -569,6 +698,13 @@ function updateShip(ship: Ship, idx: number, dt: number, time: number, level: nu
   const tAhead = bilerpHeight(aheadX, aheadZ);
   const audioLift = level * 3.0;
   let targetY = Math.max(Math.max(tHere, tAhead) + SHIP_CLEARANCE, SHIP_Y_MIN + audioLift);
+  // Player pitch input — Up climbs, Down dives. ±5 unit altitude offset so
+  // the ship can clear ridges or hug the valleys on demand. The hard
+  // terrain-clearance check below still kicks in to prevent crashes.
+  if (tracked) {
+    const playerPitch = (arrowKeys.up ? 1 : 0) - (arrowKeys.down ? 1 : 0);
+    targetY += playerPitch * 5;
+  }
   targetY = Math.min(SHIP_Y_MAX, targetY);
   ship.prevY = pos.y;
   pos.y += (targetY - pos.y) * (1 - Math.exp(-6 * dt));
@@ -577,7 +713,7 @@ function updateShip(ship: Ship, idx: number, dt: number, time: number, level: nu
 
   // 6. orientation
   const climbRate = (pos.y - ship.prevY) / Math.max(dt, 1e-3);
-  const targetRoll = turnInput * SHIP_MAX_BANK;
+  const targetRoll = turnInput * SHIP_MAX_BANK * bankScale;
   const targetPitch = clamp(climbRate * SHIP_PITCH_GAIN, -SHIP_MAX_PITCH, SHIP_MAX_PITCH);
   const orientLerp = 1 - Math.exp(-7 * dt);
   ship.roll += (targetRoll - ship.roll) * orientLerp;
@@ -829,17 +965,16 @@ audioEl.addEventListener('ended', () => {
   playBtn.textContent = 'play';
 });
 
-function attachStream(stream: MediaStream, label: string, opts?: { audible?: boolean }) {
+function attachStream(stream: MediaStream, label: string) {
   const { ctx, analyser } = ensureAudio();
   audioEl.pause();
   disconnectCurrent();
   micStream = stream; // reuse cleanup path (track stop on disconnect)
   const src = ctx.createMediaStreamSource(stream);
   src.connect(analyser);
-  // Tab audio: also connect to destination so the user hears the captured
-  // audio (otherwise the visualization runs but they hear silence).
-  // Mic: never connect to destination — feedback risk.
-  if (opts?.audible) analyser.connect(ctx.destination);
+  // Never connect captured streams to destination. The source tab already
+  // plays its own audio through the OS mixer, and the mic would feedback —
+  // this tab is silent and uses the stream only for analysis.
   connectBpmSource(src, BPM_GAIN_MIC);
   currentSourceNode = src;
   playBtn.disabled = true;
@@ -873,7 +1008,7 @@ tabBtn.addEventListener('click', async () => {
       statusEl.textContent = 'no tab audio — tick "share tab audio" in the picker';
       return;
     }
-    attachStream(stream, 'tab audio', { audible: true });
+    attachStream(stream, 'tab audio · source tab plays it');
   } catch (e) {
     statusEl.textContent = `tab audio failed: ${(e as Error).message}`;
   }
@@ -970,18 +1105,75 @@ const CAM_PRESETS: CamPreset[] = [
   { yaw: 0,        pitch: 0.0,  radius: 2,  height: 42 }, // straight overhead
 ];
 
-// 4 cinematic presets, then chase + cockpit per ship. 'C' cycles, auto-advance
-// every 8 beats (or 8 s if BPM hasn't locked).
+// 5 cinematic presets, then chase + cockpit per ship. 'C' cycles manually;
+// the music-driven director (see runCinematicDirector below) handles auto.
 const CAM_MODES: CamMode[] = [
   ...CAM_PRESETS.map((preset, i): CamMode => ({ kind: 'preset', preset, label: `preset ${i + 1}` })),
   ...ships.map((_, i): CamMode => ({ kind: 'chase', shipIdx: i, label: `chase ship ${i + 1}` })),
   ...ships.map((_, i): CamMode => ({ kind: 'cockpit', shipIdx: i, label: `cockpit ship ${i + 1}` })),
 ];
+
+// Director role pools — indices into CAM_MODES. A mode can appear in multiple
+// roles (e.g. low-left works for both calm holds and active beat cuts).
+//   0 eye-level · 1 3/4-high · 2 low-left · 3 overhead-reverse · 4 top-down
+//   5,6,7 chase · 8,9,10 cockpit
+const MODE_ROLES = {
+  calm:     [0, 2],
+  active:   [0, 2, 5, 6, 7],
+  dramatic: [1, 3, 4],
+  rush:     [5, 6, 7, 8, 9, 10],
+} as const;
+
 let currentCamModeIdx = 0;
 let camModeChangedAt = 0;       // ms timestamp of last cam switch
 let camBeatsAtChange = 0;       // beatCount snapshot at last cam switch
 let cinematicAuto = true;       // toggle with 'V' — when off, stays on current mode
 let beatCount = 0;
+
+// Director state — tracked across frames so transitions (build onset, quiet
+// onset) fire on the rising edge rather than every frame the condition holds.
+let prevBuild = 0;
+let prevQuiet = false;
+let lastBuildCutAt = 0;       // ms timestamp; 3-second refractory between build cuts
+let nextCutMinBeats = 0;      // beat count at which the next cadence cut may fire
+const recentModeIdxs: number[] = []; // last 2 picks; rejection-sample to avoid repeats
+
+// Pilot override — arrow-key presses in chase/cockpit extend the current
+// shot by 5 s so the user can keep flying without the director cutting away.
+// Each press refreshes the timer; held arrows continually push it forward
+// via browser autorepeat.
+const PILOT_EXTEND_MS = 5000;
+let pilotActiveUntil = 0;
+function bumpPilotControl() {
+  const m = CAM_MODES[currentCamModeIdx];
+  if (m.kind === 'chase' || m.kind === 'cockpit') {
+    pilotActiveUntil = performance.now() + PILOT_EXTEND_MS;
+  }
+}
+
+function pickCinematicMode(role: keyof typeof MODE_ROLES): number {
+  const pool = MODE_ROLES[role];
+  // Avoid the current mode and recent picks; if everything is excluded, drop
+  // the recency constraint (still avoid the current mode for visible variety).
+  const fresh = pool.filter(
+    (idx) => idx !== currentCamModeIdx && !recentModeIdxs.includes(idx),
+  );
+  const candidates = fresh.length > 0
+    ? fresh
+    : pool.filter((idx) => idx !== currentCamModeIdx);
+  const choice = candidates.length > 0
+    ? candidates[(Math.random() * candidates.length) | 0]
+    : pool[0];
+  recentModeIdxs.push(choice);
+  if (recentModeIdxs.length > 2) recentModeIdxs.shift();
+  return choice;
+}
+
+function applyCut(idx: number) {
+  currentCamModeIdx = idx;
+  camModeChangedAt = performance.now();
+  camBeatsAtChange = beatCount;
+}
 
 // ----- keyboard shortcuts -----
 document.addEventListener('keydown', (e) => {
@@ -1035,7 +1227,42 @@ document.addEventListener('keydown', (e) => {
       stereoCamera.eyeSep = Math.min(2.0, stereoCamera.eyeSep + 0.05);
       statusEl.textContent = `eyeSep ${stereoCamera.eyeSep.toFixed(2)}`;
       break;
+    case 'arrowleft':
+      arrowKeys.left = true;
+      bumpPilotControl();
+      e.preventDefault();
+      break;
+    case 'arrowright':
+      arrowKeys.right = true;
+      bumpPilotControl();
+      e.preventDefault();
+      break;
+    case 'arrowup':
+      arrowKeys.up = true;
+      bumpPilotControl();
+      e.preventDefault();
+      break;
+    case 'arrowdown':
+      arrowKeys.down = true;
+      bumpPilotControl();
+      e.preventDefault();
+      break;
   }
+});
+
+document.addEventListener('keyup', (e) => {
+  switch (e.key.toLowerCase()) {
+    case 'arrowleft':  arrowKeys.left = false; break;
+    case 'arrowright': arrowKeys.right = false; break;
+    case 'arrowup':    arrowKeys.up = false; break;
+    case 'arrowdown':  arrowKeys.down = false; break;
+  }
+});
+
+// Lose all held inputs on window blur — without this, switching tabs while
+// holding an arrow leaves the ship locked into a turn forever.
+window.addEventListener('blur', () => {
+  arrowKeys.left = arrowKeys.right = arrowKeys.up = arrowKeys.down = false;
 });
 
 // ----- UI auto-hide: show while pointer is in the window, fade 3 s after it leaves
@@ -1057,6 +1284,7 @@ document.body.addEventListener('pointerleave', () => {
 let lastSeenDropCount = 0;
 let dropFovOverlayUntil = 0; // ms timestamp; FOV widens until this time
 let dbgFrameCounter = 0;     // throttles debug-panel DOM rebuilds
+let dropFiredThisFrame = false; // consumed by the cinematic director below
 
 function onDrop() {
   // Formation flight for ~6 seconds (≈8 bars at 120 BPM, 4 bars at 60 BPM —
@@ -1065,19 +1293,9 @@ function onDrop() {
   activateFormation(ms);
   // FOV widen pulse — the awe shot
   dropFovOverlayUntil = performance.now() + 600;
-  // Reveal-shot leitmotif — every 4th drop forces the next camera mode to
-  // the straight-overhead preset. Only when cinematic auto-cycle is on so
-  // the user's manual selection isn't hijacked.
-  if (cinematicAuto && dynamics.dropCount % 4 === 0) {
-    const overheadIdx = CAM_MODES.findIndex(
-      (m) => m.kind === 'preset' && m.label === 'preset 5',
-    );
-    if (overheadIdx >= 0) {
-      currentCamModeIdx = overheadIdx;
-      camModeChangedAt = performance.now();
-      camBeatsAtChange = beatCount;
-    }
-  }
+  // The cinematic director (later in the same frame) reads this flag to
+  // hard-cut to a dramatic angle.
+  dropFiredThisFrame = true;
 }
 
 // ----- animation loop -----
@@ -1186,7 +1404,9 @@ function animate() {
     for (let i = 1; i < fftBins.length; i++) { cn += i * fftBins[i]; cd += fftBins[i]; }
     if (cd > 0) centroid = cn / cd / (fftBins.length - 1);
   }
-  // fire drop-response side effects when a new drop has been recorded
+  // fire drop-response side effects when a new drop has been recorded.
+  // Reset dropFiredThisFrame here so it's only true on the frame the drop fires.
+  dropFiredThisFrame = false;
   if (dynamics.dropCount !== lastSeenDropCount) {
     lastSeenDropCount = dynamics.dropCount;
     onDrop();
@@ -1214,20 +1434,77 @@ function animate() {
   formation.blendIn += ((formation.active ? 1 : 0) - formation.blendIn) * formationLerp;
   formation.blendOut = formation.blendIn; // single state suffices — blend toward target
 
-  ships.forEach((ship, i) => updateShip(ship, i, dt, t, level, centroid));
+  // The currently-tracked ship (chase/cockpit) flies calmer to reduce VR-style
+  // motion sickness from constant spinning; cinematic modes don't track a ship.
+  const camMode_ = CAM_MODES[currentCamModeIdx];
+  const trackedShipIdx =
+    camMode_.kind === 'chase' || camMode_.kind === 'cockpit'
+      ? camMode_.shipIdx
+      : -1;
+  ships.forEach((ship, i) =>
+    updateShip(ship, i, dt, t, level, centroid, i === trackedShipIdx),
+  );
 
-  // auto-advance camera mode every 8 beats (BPM-locked) or 8 s fallback —
-  // only when cinematic auto-cycle is on. 'V' toggles, 'C' jumps regardless.
+  // Music-driven cinematic director — synchronises cuts to drops, builds,
+  // quiet sections, and beat cadence so the camera feels edited to the
+  // track. 'V' toggles this off; 'C' jumps regardless.
   if (cinematicAuto) {
-    const beatsPerSwitch = 8;
-    const fallbackMs = 8000;
-    const ready = bpm > 0
-      ? beatCount - camBeatsAtChange >= beatsPerSwitch
-      : performance.now() - camModeChangedAt >= fallbackMs;
-    if (ready) {
-      currentCamModeIdx = (currentCamModeIdx + 1) % CAM_MODES.length;
-      camModeChangedAt = performance.now();
+    const now = performance.now();
+    if (now < pilotActiveUntil) {
+      // Pilot in control: keep the shot, pin the cadence baselines so the
+      // next cut is computed from the moment the pilot lets go (not from
+      // before they grabbed the stick). prev* trackers stay current so we
+      // don't fire a stale onset edge once they release.
       camBeatsAtChange = beatCount;
+      camModeChangedAt = now;
+      prevBuild = dynamics.build;
+      prevQuiet = dynamics.quiet;
+    } else {
+      const buildOnset = dynamics.build > 0.45 && prevBuild <= 0.45;
+      const quietOnset = dynamics.quiet && !prevQuiet;
+      const shotAgeMs = now - camModeChangedAt;
+      // Minimum shot durations — even musical events have to wait this long
+      // before stealing the camera, so cuts feel deliberate rather than
+      // twitchy. Languid pacing: a fresh shot needs to breathe.
+      const MIN_SHOT_EVENT_MS = 3500;   // drops, build/quiet onsets
+      const MIN_SHOT_CADENCE_MS = 6000; // beat-driven cuts during sustained energy
+
+      if (dropFiredThisFrame && shotAgeMs > MIN_SHOT_EVENT_MS) {
+        // Hard cut on a drop to a dramatic angle.
+        applyCut(pickCinematicMode('dramatic'));
+      } else if (
+        buildOnset &&
+        now - lastBuildCutAt > 6000 &&
+        shotAgeMs > MIN_SHOT_EVENT_MS
+      ) {
+        // Rising-energy moment — slam into a chase or cockpit "rush" shot.
+        applyCut(pickCinematicMode('rush'));
+        lastBuildCutAt = now;
+      } else if (quietOnset && shotAgeMs > MIN_SHOT_EVENT_MS) {
+        // Drop into a calm, wide hold and force the next cadence cut to wait.
+        applyCut(pickCinematicMode('calm'));
+        nextCutMinBeats = beatCount + 48;
+      } else {
+        // Beat cadence — long holds. Intensity narrows the interval but
+        // never below ~12 beats so even peak sections feel composed.
+        const I = dynamics.intensity;
+        const beatsPerCut = dynamics.quiet ? 48 : I > 0.85 ? 12 : I > 0.5 ? 24 : 32;
+        const beatReady =
+          beatCount - camBeatsAtChange >= beatsPerCut &&
+          beatCount >= nextCutMinBeats &&
+          shotAgeMs > MIN_SHOT_CADENCE_MS;
+        // Time fallback: 2.5× the beat-interval converted to ms (or a 20 s
+        // floor when BPM hasn't locked yet) — long enough to feel patient.
+        const fallbackMs = bpm > 0 ? (60 / bpm) * 1000 * beatsPerCut * 2.5 : 20000;
+        const timeReady = shotAgeMs >= fallbackMs;
+        if (beatReady || timeReady) {
+          const role = I > 0.3 ? 'active' : 'calm';
+          applyCut(pickCinematicMode(role));
+        }
+      }
+
+      prevBuild = dynamics.build;
+      prevQuiet = dynamics.quiet;
     }
   }
 
@@ -1271,6 +1548,9 @@ function animate() {
     const sp = ship.group.position;
     const fwdX = -Math.sin(ship.heading);
     const fwdZ = -Math.cos(ship.heading);
+    // ship-Z wrapped this frame? carry the camera with it so the framing
+    // stays continuous and the lerp doesn't pan backward over half a second.
+    if (ship.zWrapDelta !== 0) camera.position.z += ship.zWrapDelta;
     const desiredX = sp.x - fwdX * 5;
     const desiredY = sp.y + 2.5;
     const desiredZ = sp.z - fwdZ * 5;
@@ -1322,13 +1602,22 @@ function animate() {
   const bpmHue = Math.max(-0.05, Math.min(0.05, (tempoForHue - 120) / 60 * 0.05));
   uniforms.uHueShift.value = (bpmHue + Math.sin(t * 0.07) * 0.04) * (0.4 + 0.6 * I);
 
-  // bloom kick on bass transients + drop burst
-  bloom.strength = (0.4 + 0.25 * I) + bassEnergy * 0.5 * I + dropBoost * 0.7;
-  // chromatic aberration: subtle baseline + bass + drop burst
-  chromaticPass.uniforms.uAmount.value = Math.min(
-    0.012,
-    0.0008 + bassEnergy * 0.006 * I + dropBoost * 0.005,
-  );
+  // bloom kick on bass transients + drop burst. Stereo mode uses a much
+  // gentler curve — UnrealBloomPass blurs across the eye seam, so we keep
+  // the strength + radius low to minimise smear into the opposite eye.
+  const bloomMul = stereoEnabled ? 0.4 : 1.0;
+  bloom.strength =
+    ((0.28 + 0.12 * I) + bassEnergy * 0.22 * I + dropBoost * 0.35) * bloomMul;
+  bloom.radius = stereoEnabled ? 0.3 : 0.55;
+  // chromatic aberration is radial-from-center and would centre on the
+  // stereo seam, so disable it in 3d mode. Keep mono baseline + bass burst.
+  chromaticPass.enabled = !stereoEnabled;
+  if (!stereoEnabled) {
+    chromaticPass.uniforms.uAmount.value = Math.min(
+      0.012,
+      0.0008 + bassEnergy * 0.006 * I + dropBoost * 0.005,
+    );
+  }
 
   // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
   beatPulse *= Math.exp(-9 * dt); // visible for ~150ms after each peak
@@ -1356,29 +1645,7 @@ function animate() {
       (dynamics.build > 0.3 ? '<span class="tag on"> BUILD</span>' : '');
   }
 
-  if (stereoEnabled) {
-    // Side-by-side stereo for AR glasses that split the screen down the
-    // middle. We bypass the EffectComposer because bloom + chromatic
-    // aberration are screen-space — applied across both eyes they would
-    // smear across the divider and break the illusion. Render each eye
-    // directly, scissored to its half of the canvas.
-    scene.updateMatrixWorld();
-    camera.updateMatrixWorld();
-    stereoCamera.update(camera);
-    const size = renderer.getSize(new THREE.Vector2());
-    const halfW = size.x / 2;
-    renderer.setScissorTest(true);
-    renderer.setScissor(0, 0, halfW, size.y);
-    renderer.setViewport(0, 0, halfW, size.y);
-    renderer.render(scene, stereoCamera.cameraL);
-    renderer.setScissor(halfW, 0, halfW, size.y);
-    renderer.setViewport(halfW, 0, halfW, size.y);
-    renderer.render(scene, stereoCamera.cameraR);
-    renderer.setScissorTest(false);
-    renderer.setViewport(0, 0, size.x, size.y);
-  } else {
-    composer.render(dt);
-  }
+  composer.render(dt);
 }
 animate();
 

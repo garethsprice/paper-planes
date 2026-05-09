@@ -30,6 +30,7 @@ Since I was a kid I've watched something like this in my head whenever I've list
 | **space** | play / pause |
 | **C** | next camera (cinematic preset → chase ships → cockpit ships) |
 | **V** | toggle cinematic auto-advance |
+| **arrows** | (chase / cockpit only) joystick — left/right yaw, up/down pitch |
 | **B** | toggle bloom |
 | **N** | toggle particle nebula |
 | **3** | toggle side-by-side stereo (for AR glasses that split the screen) |
