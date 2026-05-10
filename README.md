@@ -35,6 +35,7 @@ Since I was a kid I've watched something like this in my head whenever I've list
 | **N** | toggle particle nebula |
 | **3** | toggle side-by-side stereo (for AR glasses that split the screen) |
 | **[** / **]** | nudge stereo eye separation |
+| **enter vr** | (button, shown only when WebXR is supported) immersive 360° stereo on Quest browser — head rotation looks around the scene from a fixed scenic anchor; cinematic auto-cycle and post-processing pause while presenting |
 | **F** | fullscreen |
 | **R** | reset BPM lock |
 
