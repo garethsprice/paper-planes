@@ -69,6 +69,50 @@ A GitHub Actions workflow (`.github/workflows/deploy.yml`) automatically builds 
 - [`simplex-noise`](https://www.npmjs.com/package/simplex-noise) for organic ship-wander targets
 - [`realtime-bpm-analyzer`](https://www.npmjs.com/package/realtime-bpm-analyzer) for live BPM lock
 
+## Code map
+
+`main.ts` is now a thin orchestrator (~400 lines) that wires modules together and runs the per-frame loop. Each module exports an `init`/factory function returning a POJO handle, and an `update(handle, frame)` (or similar) for per-frame work. The `Frame` object in `src/frame.ts` is the per-frame context that subsystems read/write.
+
+```
+src/
+├── main.ts            bootstrap + animation loop
+├── constants.ts       all numeric tunables (grid, ship, audio, camera)
+├── frame.ts           per-frame Frame type
+│
+├── scene/
+│   ├── core.ts        scene, fog, master camera, shared uniforms
+│   ├── terrain.ts     line-grid spectrogram + shaders + bilerpHeight
+│   ├── stars.ts       full-sphere star field
+│   ├── nebula.ts      spherical particle nebula
+│   └── ship.ts        Ship type, makeShip/updateShip, formation
+│
+├── audio/
+│   ├── sources.ts     AudioContext + analyser + file/mic/tab attach
+│   ├── analyser.ts    per-frame fft → bass/level/centroid extraction
+│   ├── bpm.ts         realtime-bpm-analyzer wiring + beat events
+│   └── dynamics.ts    short/mid/long EMAs → intensity/build/quiet/drops
+│
+├── camera/
+│   ├── modes.ts       CamMode union, role pools, pickCinematicMode
+│   ├── orbit.ts       mouse-drag spring physics for preset cams
+│   ├── update.ts      per-frame switch over the active mode
+│   └── director.ts    music-driven cuts + pilot-extension override
+│
+├── render/
+│   ├── pipeline.ts    renderer + composer + bloom + chromatic + post-fx
+│   └── stereo.ts      StereoCamera + HybridRenderPass for AR-glasses SBS
+│
+├── xr/
+│   └── session.ts     WebXR Quest session lifecycle
+│
+├── input/
+│   └── keys.ts        keyboard shortcuts + arrow-key joystick state
+│
+└── ui/
+    ├── dom.ts         cached DOM element refs
+    └── status.ts      BPM readout, debug panel, UI auto-hide
+```
+
 ## Browser support
 
 - **Chrome / Edge** — fully supported (mic, tab audio, all post passes).
