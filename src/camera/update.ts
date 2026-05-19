@@ -48,22 +48,24 @@ export function updateCamera(
     camera.position.y = orbit.camHeight + orbit.pitch * 12;
     camera.lookAt(0, 1.5, 0);
   } else if (camMode.kind === 'chase') {
-    // 5 behind, 2.5 above, lerp-smoothed; the carried zWrapDelta keeps the
-    // camera with the ship across front/back wrap so the framing doesn't
-    // pan backward when the wrap fires.
+    // Rigid in the ship's yaw frame: X/Z snap to "5 behind heading" so the
+    // view-forward axis can never desync from the nose (that desync was what
+    // read as the ship "strafing sideways"). Only Y lerps, to soften terrain
+    // bobs. The carried zWrapDelta keeps the camera with the ship across
+    // front/back wrap so the framing doesn't pan backward when the wrap fires.
     const ship = ships[camMode.shipIdx];
     const sp = ship.group.position;
     const fwdX = -Math.sin(ship.heading);
     const fwdZ = -Math.cos(ship.heading);
     if (ship.zWrapDelta !== 0) camera.position.z += ship.zWrapDelta;
-    const desiredX = sp.x - fwdX * 5;
-    const desiredY = sp.y + 2.5;
-    const desiredZ = sp.z - fwdZ * 5;
-    const k = 1 - Math.exp(-8 * input.dt);
-    camera.position.x += (desiredX - camera.position.x) * k;
-    camera.position.y += (desiredY - camera.position.y) * k;
-    camera.position.z += (desiredZ - camera.position.z) * k;
-    camera.lookAt(sp.x + fwdX * 3, sp.y, sp.z + fwdZ * 3);
+    const camY = sp.y + 2.0;
+    camera.position.x = sp.x - fwdX * 5;
+    camera.position.z = sp.z - fwdZ * 5;
+    const ky = 1 - Math.exp(-6 * input.dt);
+    camera.position.y += (camY - camera.position.y) * ky;
+    // Look 18u ahead at camera height — view-forward is horizontal, so the
+    // horizon stays near screen-centre and the ship rides the lower third.
+    camera.lookAt(sp.x + fwdX * 18, camera.position.y, sp.z + fwdZ * 18);
   } else if (camMode.kind === 'cockpit') {
     // Locked to the ship's nose, looking forward. Hide own ship.
     const ship = ships[camMode.shipIdx];
