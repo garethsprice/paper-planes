@@ -13,7 +13,7 @@ export const NOISE_AMP = 0.18;
 // at quarter the fragment cost (5-mip pyramid × 2 blurs each).
 export const BLOOM_DIVISOR = 2;
 
-// ----- ship flight model -----
+// ----- ship flight model (Rapier rigid-body dynamics) -----
 export const SHIP_X_BOUND = WIDTH * 0.40;
 export const SHIP_Z_MIN = -16;
 export const SHIP_Z_MAX = 18;
@@ -23,15 +23,41 @@ export const SHIP_Y_MAX = HEIGHT_SCALE * 1.5 + 1;
 export const SHIP_CLEARANCE = 1.5;       // soft clearance above forward-sampled terrain
 export const SHIP_HARD_CLEAR = 0.95;     // hard collision safety margin (clears keel)
 export const SHIP_LOOKAHEAD_DIST = 5.0;  // world units ahead to sample for altitude
-export const SHIP_BASE_SPEED = 8;        // units/sec at idle
-export const SHIP_SPEED_BOOST = 14;      // additional with full bass
-export const SHIP_ACCEL_RATE = 1.6;      // 1/sec lerp toward target speed
-export const SHIP_TURN_RATE = 1.8;       // rad/sec maximum yaw rate
-export const SHIP_TURN_GAIN = 2.5;       // P-controller on heading error
-export const SHIP_TURN_SLOWDOWN = 0.30;  // fractional speed loss at full turn input
 export const SHIP_MAX_BANK = 0.95;       // rad
 export const SHIP_MAX_PITCH = 0.55;      // rad
-export const SHIP_PITCH_GAIN = 0.06;     // pitch per (unit/sec) of climb rate
+
+// Forces (N at 1 kg mass). Paper-plane drift: cruise ≈ sqrt(0.8/0.05) ≈ 4 u/s
+// baseline, sqrt(1.5/0.05) ≈ 5.5 u/s at full bass.
+export const SHIP_THRUST_BASE = 0.8;
+export const SHIP_THRUST_BOOST = 0.7;     // additional with full bass
+export const SHIP_THRUST_BEAT = 0.2;      // per-beat impulse
+export const SHIP_DRAG_K = 0.05;          // F_drag = K · |v| · v
+
+// Lift = K · CL(α) · |v|², along body-up. K_lift is high to compensate for the
+// slow cruise speed (lift goes as v²; halving v ⇒ ¼ the lift, so K up to keep
+// lift in the right range to balance gravity).
+export const SHIP_LIFT_K = 0.15;
+export const SHIP_CL_SLOPE = 6.28;        // ∂CL/∂α at low AoA
+export const SHIP_CL_MAX = 1.4;           // saturation (real airfoils stall here)
+// Autopilot mapping. The pitch target also includes a velocity-aware AoA trim
+// (computed in ship.ts) so the plane carries the AoA needed to balance gravity
+// at its current speed.
+export const SHIP_HEADING_TO_BANK = 0.5;
+export const SHIP_ALT_TO_PITCH = 0.30;
+export const SHIP_PITCH_VY_DAMP = 0.04;   // gentle phugoid damper (used to be a feedback amplifier when too high)
+
+// Kinematic attitude rates. All three are first-order-lerp coefficients (1/s).
+// SHIP_YAW_RATE now governs how fast the mesh's heading slews toward the
+// velocity vector (so the nose tracks motion direction); lower = floatier
+// turn-in lag, higher = nose snaps to velocity.
+export const SHIP_YAW_RATE = 3.0;
+export const SHIP_PITCH_LERP = 1.5;
+export const SHIP_ROLL_LERP = 1.5;
+
+// World gravity — light so the paper plane glides at low cruise speeds.
+// Cruise AoA solves K_lift·CL_slope·α·v² = g → α ≈ 7° at v=5.5, which fits
+// comfortably below MAX_PITCH and stall.
+export const SHIP_GRAVITY = 3.5;
 
 // Slot offsets in the formation, leader-relative. ships[0] is the leader.
 export const FORMATION_SLOTS: { dx: number; dz: number }[] = [

@@ -8,9 +8,12 @@ import basicSsl from '@vitejs/plugin-basic-ssl';
 export default defineConfig({
   base: './',
   plugins: [basicSsl()],
+  // 'esnext' so top-level await (used to gate startup on Rapier WASM init) lands
+  // un-transpiled. All evergreen browsers support it.
+  build: { target: 'esnext' },
+  optimizeDeps: { esbuildOptions: { target: 'esnext' } },
   server: {
     host: '0.0.0.0',
-    // accept requests under any hostname (LAN, Tailscale, custom DNS, etc.)
     allowedHosts: true,
   },
 });

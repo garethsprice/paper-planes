@@ -15,7 +15,8 @@ import { createSceneCore } from './scene/core.ts';
 import { createTerrain, sampleLogBin } from './scene/terrain.ts';
 import { createStars } from './scene/stars.ts';
 import { createNebula } from './scene/nebula.ts';
-import { createShips, activateFormation, updateShip } from './scene/ship.ts';
+import { createShips, activateFormation, updateShipControls, syncShipFromBody } from './scene/ship.ts';
+import { createPhysics } from './scene/physics.ts';
 import {
   ensureAudio, getAudio, attachStream, loadAudioFile,
   type AudioState,
@@ -52,14 +53,17 @@ const { posAttr, heights, noise3, binMap, mirrorMaterial } = terrain;
 const stars = createStars(scene);
 const nebula = createNebula(scene);
 
+// ----- Rapier physics world (must finish WASM init before bodies can spawn) -----
+const physics = await createPhysics();
+
 // ----- ships + formation flight (factories live in src/scene/ship.ts) -----
-const shipsHandle = createShips(scene);
+const shipsHandle = createShips(scene, physics);
 const ships = shipsHandle.list;
 const formation = shipsHandle.formation;
 
 
 // ----- audio plumbing -----
-// Per-frame mutable context — extractAudio / updateDynamics / updateShip
+// Per-frame mutable context — extractAudio / updateDynamics / updateShipControls
 // each read what they need and write whatever they own.
 const frame = createFrame();
 const bpmHandle = createBpmHandle();
@@ -311,15 +315,20 @@ function animate() {
   formation.blendIn += ((formation.active ? 1 : 0) - formation.blendIn) * formationLerp;
   formation.blendOut = formation.blendIn; // single state suffices — blend toward target
 
-  // The currently-tracked ship (chase/cockpit) flies calmer to reduce VR-style
-  // motion sickness from constant spinning; cinematic modes don't track a ship.
+  // The currently-tracked ship (chase/cockpit) wraps Z front↔back; others clamp.
   const trackedShipIdx = getTrackedShipIdx(cameraSel);
+  const shipInput = {
+    dt, time: t, level, centroid,
+    bassEnergy, beatPulse: bpmHandle.beatPulse, arrowKeys,
+  };
+  // 1. Queue forces and torques on every body.
   ships.forEach((ship, i) =>
-    updateShip(ship, i, ships, formation, terrain, {
-      dt, time: t, level, centroid,
-      bassEnergy, beatPulse: bpmHandle.beatPulse, arrowKeys,
-    }, i === trackedShipIdx),
+    updateShipControls(ship, i, ships, formation, terrain, shipInput, i === trackedShipIdx),
   );
+  // 2. One world step integrates all bodies under the queued forces.
+  physics.world.step();
+  // 3. Post-step: sync Three.js groups, enforce terrain floor + bounds, refresh heading cache.
+  ships.forEach((ship, i) => syncShipFromBody(ship, terrain, i === trackedShipIdx));
 
   // Music-driven cinematic director — synchronises cuts to drops, builds,
   // quiet sections, and beat cadence. 'V' toggles, 'C' jumps regardless.

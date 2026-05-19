@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.19.3",
     "realtime-bpm-analyzer": "^5.0.13",
     "simplex-noise": "^4.0.3",
     "three": "^0.166.1"
