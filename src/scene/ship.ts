@@ -31,10 +31,11 @@ import {
   SHIP_SURGE_Z_GAIN, SHIP_SURGE_MAX, SHIP_SURGE_BASS, SHIP_SURGE_BEAT,
   SHIP_SPEED_LERP, SHIP_SPEED_MIN, SHIP_GRAVITY_PATH, SHIP_TURN_G,
   SHIP_LAT_GAIN, SHIP_LAT_MAX, SHIP_HEADING_TO_BANK, SHIP_YAW_DAMP,
-  SHIP_ROLL_RATE, SHIP_ROLL_LERP, SHIP_PITCH_LERP,
+  SHIP_ROLL_RATE, SHIP_PITCH_RATE, SHIP_ROLL_LERP, SHIP_PITCH_LERP,
   SHIP_ALT_GAIN, SHIP_VY_MAX, SHIP_ALT_WANDER, SHIP_VISUAL_AOA,
   SHIP_ENVELOPE_RISE, SHIP_ENVELOPE_SINK,
-  SHIP_ACCEL_TO_PITCH, SHIP_ACCEL_TO_NOSE, SHIP_ACCEL_SMOOTH_S,
+  SHIP_ACCEL_TO_PITCH, SHIP_DECEL_TO_PITCH, SHIP_ACCEL_TO_NOSE, SHIP_DECEL_TO_NOSE,
+  SHIP_NOSE_OFFSET_MIN, SHIP_NOSE_OFFSET_MAX, SHIP_TURN_AOA, SHIP_ACCEL_SMOOTH_S,
   SHIP_SEP_RADIUS, SHIP_SEP_STRENGTH, SHIP_SEP_MAX,
   TERRAIN_ROW_SPACING,
   FORMATION_SLOTS, SHIP_MAX,
@@ -325,7 +326,9 @@ export function updateShip(
   // Command a vertical *speed* proportional to the error, then the path
   // angle that produces it at the current airspeed. Because the loop is
   // closed on velocity (not on pitch directly) it settles without a phugoid.
-  const vyDes = clamp((ship.cruiseY - p.y) * SHIP_ALT_GAIN, -SHIP_VY_MAX, SHIP_VY_MAX);
+  // Arrivals descend from their staging height faster than cruise allows.
+  const vyMax = SHIP_VY_MAX * (ship.phase === 'joining' ? 1.6 : 1);
+  const vyDes = clamp((ship.cruiseY - p.y) * SHIP_ALT_GAIN, -vyMax, vyMax);
   let targetPitch = clamp(
     Math.asin(clamp(vyDes / ship.speed, -0.9, 0.9)),
     -SHIP_MAX_PITCH, SHIP_MAX_PITCH,
@@ -341,7 +344,7 @@ export function updateShip(
   if (ship.phase === 'joining') speedCmd += FLOCK_JOIN_SURGE;
   if (leaving) {
     speedCmd = groundFlow - FLOCK_LEAVE_DROP;
-    targetPitch = clamp(targetPitch + 0.12, -SHIP_MAX_PITCH, SHIP_MAX_PITCH);
+    targetPitch = clamp(targetPitch + 0.06, -SHIP_MAX_PITCH, SHIP_MAX_PITCH);
   }
 
   // Drop dive: nose down for a beat, then the altitude hold recovers.
@@ -361,23 +364,26 @@ export function updateShip(
   // Speed eases toward the command; gravity along the path adds the
   // paper-plane feel — dives pick up pace, climbs bleed it. The resulting
   // acceleration is smoothed and fed back into pitch: accelerating drops
-  // the nose (the plane dives for its speed), decelerating flares it up.
+  // the nose (the plane dives for its speed); easing off lifts it only a
+  // little — a slowing aircraft settles, it does not rear up.
   const accelRaw =
     (speedCmd - ship.speed) * SHIP_SPEED_LERP - SHIP_GRAVITY_PATH * Math.sin(ship.pitch);
   ship.accel += (accelRaw - ship.accel) * (1 - Math.exp(-dt / SHIP_ACCEL_SMOOTH_S));
+  const accelPitchGain = ship.accel > 0 ? SHIP_ACCEL_TO_PITCH : SHIP_DECEL_TO_PITCH;
   targetPitch = clamp(
-    targetPitch - ship.accel * SHIP_ACCEL_TO_PITCH,
+    targetPitch - ship.accel * accelPitchGain,
     -SHIP_MAX_PITCH, SHIP_MAX_PITCH,
   );
 
   // ----- ease attitude + speed toward commands -----
-  // Roll is first-order with a rate cap, so a large heading error rolls in
-  // at a steady, visible pace instead of snapping to full bank.
+  // Roll and pitch are first-order with rate caps, so a large command rolls
+  // or pitches in at a steady, visible pace instead of snapping.
   const rollLerp = 1 - Math.exp(-SHIP_ROLL_LERP * dt);
   const rollMaxStep = SHIP_ROLL_RATE * dt;
   ship.roll += clamp((targetRoll - ship.roll) * rollLerp, -rollMaxStep, rollMaxStep);
   const pitchLerp = 1 - Math.exp(-SHIP_PITCH_LERP * dt);
-  ship.pitch += (targetPitch - ship.pitch) * pitchLerp;
+  const pitchMaxStep = SHIP_PITCH_RATE * dt;
+  ship.pitch += clamp((targetPitch - ship.pitch) * pitchLerp, -pitchMaxStep, pitchMaxStep);
   ship.speed = Math.max(SHIP_SPEED_MIN, ship.speed + accelRaw * dt);
 
   // Load: what the wings are working against. A coordinated turn at bank φ
@@ -411,7 +417,9 @@ export function updateShip(
   const floorY = bilerpHeight(terrain, p.x, p.z) + SHIP_HARD_CLEAR;
   if (p.y < floorY) {
     p.y = floorY;
-    if (ship.pitch < 0.08) ship.pitch = 0.08;
+    // Level off rather than snapping nose-up; the altitude hold does the
+    // climbing at a rate the eye accepts.
+    if (ship.pitch < 0) ship.pitch = 0;
   }
   if (p.y > SHIP_Y_MAX + 2) p.y = SHIP_Y_MAX + 2;
   // Soft walls: guidance always steers toward an in-box target, so these
@@ -441,13 +449,17 @@ export function updateShip(
 
   // ----- attitude -----
   // The nose rides a few degrees above the flight path (angle of attack),
-  // which is what makes a gliding paper plane read as *flying* rather than
-  // sliding along a rail — and it leads the acceleration: pushing forward
-  // tips it down beyond the path, easing off lifts it.
-  const nose = clamp(
-    ship.pitch + SHIP_VISUAL_AOA - ship.accel * SHIP_ACCEL_TO_NOSE,
-    -0.9, 0.9,
+  // more so in a bank where the wing must make extra lift, which is what
+  // makes a paper plane read as *flying* rather than sliding along a rail.
+  // Accelerating tips it down beyond the path; easing off lifts it only a
+  // touch. The offset from the path is capped either way — a nose that
+  // strays further than that stops looking like an aircraft.
+  const turnAoA = (1 / Math.max(0.3, Math.cos(ship.roll)) - 1) * SHIP_TURN_AOA;
+  const accelNoseGain = ship.accel > 0 ? SHIP_ACCEL_TO_NOSE : SHIP_DECEL_TO_NOSE;
+  const noseOffset = clamp(
+    SHIP_VISUAL_AOA + turnAoA - ship.accel * accelNoseGain,
+    SHIP_NOSE_OFFSET_MIN, SHIP_NOSE_OFFSET_MAX,
   );
-  _euler.set(nose, ship.heading, ship.roll, 'YXZ');
+  _euler.set(ship.pitch + noseOffset, ship.heading, ship.roll, 'YXZ');
   ship.group.quaternion.setFromEuler(_euler);
 }

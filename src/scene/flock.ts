@@ -68,7 +68,7 @@ function stageArrival(ship: Ship, time: number): void {
     SHIP_Z_MIN - FLOCK_JOIN_DIST,
   );
   ship.heading = Math.PI;
-  ship.pitch = -0.1;
+  ship.pitch = -0.15; // already descending toward the flock
   ship.roll = 0;
   ship.speed = 30;
   ship.accel = 0;

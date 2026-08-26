@@ -113,7 +113,7 @@ export const SHIP_CLEARANCE = 2.2;       // cruise height above the terrain enve
 export const SHIP_HARD_CLEAR = 0.95;     // hard collision safety margin (clears keel)
 export const SHIP_LOOKAHEAD_DIST = 14.0; // envelope sample span ahead of the nose (u)
 export const SHIP_MAX_BANK = 0.75;       // rad (≈43°)
-export const SHIP_MAX_PITCH = 0.42;      // rad, flight-path angle
+export const SHIP_MAX_PITCH = 0.32;      // rad, flight-path angle (≈18°)
 
 // Airspeed. Cruise ≈ ground flow (~23 u/s at 60 Hz) so a plane pointed into
 // the flow holds station; the autopilot adds a surge to close Z error and the
@@ -135,7 +135,8 @@ export const SHIP_LAT_GAIN = 0.6;
 export const SHIP_LAT_MAX = 10;           // u/s
 export const SHIP_HEADING_TO_BANK = 1.6;  // rad of bank per rad of heading error
 export const SHIP_YAW_DAMP = 0.5;         // bank command damping on current turn rate
-export const SHIP_ROLL_RATE = 1.4;        // rad/s cap on roll — rolls in visibly, never snaps
+export const SHIP_ROLL_RATE = 1.0;        // rad/s cap on roll — rolls in visibly, never snaps
+export const SHIP_PITCH_RATE = 0.45;      // rad/s cap on pitch — the nose never jerks
 export const SHIP_ROLL_LERP = 2.2;        // 1/s first-order ease toward the bank command
 export const SHIP_PITCH_LERP = 1.6;       // 1/s first-order ease toward the pitch command
 
@@ -143,21 +144,28 @@ export const SHIP_PITCH_LERP = 1.6;       // 1/s first-order ease toward the pit
 // and derives the path angle from it, so the loop closes on velocity and
 // settles without a phugoid bounce.
 export const SHIP_ALT_GAIN = 0.9;
-export const SHIP_VY_MAX = 5;
+export const SHIP_VY_MAX = 4;             // ≈10° climb at cruise; arrivals get 1.6× to descend
 export const SHIP_ALT_WANDER = 1.2;       // noise-driven cruise-altitude offset (u)
 // Envelope follow: climb onto a rising envelope at this rate (1/s), sink
 // away from a falling one at this speed (u/s) — fast up, lazy down.
 export const SHIP_ENVELOPE_RISE = 3.0;
 export const SHIP_ENVELOPE_SINK = 0.5;
 export const SHIP_VISUAL_AOA = 0.07;      // nose-above-path angle for the mesh (rad)
-// Acceleration → pitch. A paper plane gains speed by dropping its nose and
-// sheds it by flaring, so the commanded path angle dips by ACCEL_TO_PITCH
-// per u/s² of acceleration and the visible nose leads further by
-// ACCEL_TO_NOSE. Smoothed over ACCEL_SMOOTH_S so beats read as a nod, not a
-// twitch. At a full-bass onset (~7 u/s²) the nose drops ≈16°.
-export const SHIP_ACCEL_TO_PITCH = 0.02;  // rad per u/s², flight path
-export const SHIP_ACCEL_TO_NOSE = 0.02;   // rad per u/s², extra on the mesh
-export const SHIP_ACCEL_SMOOTH_S = 0.25;
+// Acceleration → pitch. A plane gains speed by dropping its nose, so the
+// commanded path angle dips by ACCEL_TO_PITCH per u/s² of acceleration and
+// the visible nose leads a little further by ACCEL_TO_NOSE. Easing off is
+// far gentler (DECEL_*): a real aircraft slowing down does not rear up, it
+// just settles. The nose may never leave the flight path by more than
+// NOSE_OFFSET_MIN/MAX — beyond that it stops looking like flying. Smoothed
+// over ACCEL_SMOOTH_S so beats read as a nod, not a twitch.
+export const SHIP_ACCEL_TO_PITCH = 0.012; // rad per u/s², flight path, accelerating
+export const SHIP_DECEL_TO_PITCH = 0.004; // …decelerating
+export const SHIP_ACCEL_TO_NOSE = 0.012;  // rad per u/s², extra on the mesh, accelerating
+export const SHIP_DECEL_TO_NOSE = 0.003;  // …decelerating
+export const SHIP_NOSE_OFFSET_MIN = -0.16; // rad below the path (dive attitude)
+export const SHIP_NOSE_OFFSET_MAX = 0.10;  // rad above the path (AoA + flare)
+export const SHIP_TURN_AOA = 0.10;         // extra nose-up per g of turn load — lift in a bank
+export const SHIP_ACCEL_SMOOTH_S = 0.3;
 
 // ----- flock size -----
 // Quiet music flies a single plane; the flock grows toward SHIP_MAX as the
