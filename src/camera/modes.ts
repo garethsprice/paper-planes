@@ -13,9 +13,9 @@ export type CamMode =
   | { kind: 'vr-observer'; label: string };
 
 export const CAM_PRESETS: CamPreset[] = [
-  { yaw: 0,        pitch: 0.0,  radius: 28, height: 9  }, // eye-level
+  { yaw: 0,        pitch: 0.0,  radius: 30, height: 6.5 }, // eye-level — low, so peaks tower
   { yaw: 0.6,      pitch: 0.25, radius: 32, height: 14 }, // 3/4 high-side
-  { yaw: -0.5,     pitch: -0.1, radius: 22, height: 6  }, // low-left
+  { yaw: -0.5,     pitch: -0.1, radius: 32, height: 4.5 }, // low-left — outside the ship box
   { yaw: Math.PI,  pitch: 0.35, radius: 36, height: 18 }, // overhead reverse
   // High crane. A modest forward offset keeps the up-vector well-defined —
   // the old near-vertical (radius 2, height 42) framing was degenerate for
@@ -30,7 +30,7 @@ export const CAM_PRESETS: CamPreset[] = [
 export const MODE_ROLES = {
   calm:     [0, 1, 2],
   active:   [0, 1, 2, 5, 6, 7],
-  dramatic: [1, 3, 4, 5, 6, 7],
+  dramatic: [3, 4, 1],          // wide reveals — the drop pulls back, never in
   rush:     [5, 6, 7],
 } as const;
 export type ModeRole = keyof typeof MODE_ROLES;

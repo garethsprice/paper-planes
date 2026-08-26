@@ -16,6 +16,8 @@ export type SharedUniforms = {
   uHueShift:        { value: number };
   uAuroraPhase:     { value: number };
   uAuroraIntensity: { value: number };
+  /** Global terrain brightness (1 = normal); the hush dims it. */
+  uDim:             { value: number };
 };
 
 export type SceneCore = {
@@ -54,6 +56,7 @@ export function createSceneCore(): SceneCore {
     uHueShift:        { value: 0.0 },
     uAuroraPhase:     { value: 0.0 },
     uAuroraIntensity: { value: 0.0 },
+    uDim:             { value: 1.0 },
   };
 
   return { scene, fog, camera, uniforms };

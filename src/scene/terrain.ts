@@ -43,6 +43,7 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
   uniform float uAuroraPhase;
   uniform float uAuroraIntensity;
   uniform float uDepthHalf;
+  uniform float uDim;
 
   // cool → hot gradient
   vec3 grade(float t) {
@@ -119,6 +120,10 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
       );
       col += auroraColor * auroraBand * uAuroraIntensity * ageFade;
     }
+
+    // hush: the whole grid sinks toward dark, leaving the stars and the
+    // lone plane
+    col *= uDim;
 
     // distance fog
     float fogF = smoothstep(uFogNear, uFogFar, vViewDist);

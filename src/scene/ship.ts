@@ -34,6 +34,7 @@ import {
   TERRAIN_ROW_SPACING,
   FORMATION_SLOTS, SHIP_MAX,
   FLOCK_JOIN_SURGE, FLOCK_LEAVE_DROP, FLOCK_FADE_S,
+  MOOD_FLOCK_TIGHTEN, MOOD_FLOCK_LIFT, MOOD_SCATTER_S, MOOD_DIVE_S, MOOD_DIVE_PITCH,
 } from '../constants.ts';
 import { bilerpHeight, type Terrain } from './terrain.ts';
 
@@ -61,6 +62,11 @@ export type Ship = {
   speed: number;
   /** Smoothed along-path acceleration (u/s²) — pitches the nose. */
   accel: number;
+  /** Drop response: a lateral scatter target that holds until scatterUntil,
+   *  and a nose-down dive until diveUntil (both absolute seconds). */
+  scatterX: number;
+  scatterUntil: number;
+  diveUntil: number;
   /** Slow-relaxing cruise altitude: rises quickly onto a loud passage's
    *  terrain envelope, sinks gently after it. See updateShip. */
   cruiseY: number;
@@ -166,6 +172,9 @@ function makeShip(
     roll: 0,
     speed: 20,
     accel: 0,
+    scatterX: 0,
+    scatterUntil: -Infinity,
+    diveUntil: -Infinity,
     cruiseY: 4,
     wanderSeed: seed,
     lastTargetX: x0,
@@ -187,13 +196,6 @@ export function createShips(scene: THREE.Scene): Ships {
   return { list, formation, geometry, panelGeometry };
 }
 
-export function activateFormation(formation: Formation, durationMs: number): void {
-  if (formation.active) return;
-  formation.active = true;
-  formation.startedAt = performance.now();
-  formation.endsAt = performance.now() + durationMs;
-}
-
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
@@ -211,8 +213,17 @@ export type ShipUpdateInput = {
   centroid: number;
   bassEnergy: number;
   beatPulse: number;
+  /** 0..1 build anticipation — tightens and lifts the flock. */
+  anticipation: number;
   arrowKeys: { left: boolean; right: boolean; up: boolean; down: boolean };
 };
+
+/** Fire the drop response on a ship: scatter sideways and dive. */
+export function scatterShip(ship: Ship, time: number, lateral: number): void {
+  ship.scatterX = lateral;
+  ship.scatterUntil = time + MOOD_SCATTER_S;
+  ship.diveUntil = time + MOOD_DIVE_S;
+}
 
 // Reused per-frame scratch — Three.js objects are heavy to allocate.
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -231,7 +242,7 @@ export function updateShip(
   piloted: boolean,
 ): void {
   if (ship.phase === 'dormant') return;
-  const { dt, time, groundFlow, centroid, bassEnergy, beatPulse, arrowKeys } = input;
+  const { dt, time, groundFlow, centroid, bassEnergy, beatPulse, anticipation, arrowKeys } = input;
   const p = ship.group.position;
   const leaving = ship.phase === 'leaving';
 
@@ -246,9 +257,14 @@ export function updateShip(
   const centroidShift = (centroid - 0.5) * 2 * SHIP_X_BOUND * 0.5;
   let targetX = clamp(wanderX * 0.55 + centroidShift * 0.6, -SHIP_X_BOUND, SHIP_X_BOUND);
   let targetZ = clamp(wanderZ, SHIP_Z_MIN, SHIP_Z_MAX);
-  // Formation override — wingmen blend toward (leader + slot).
+  // Formation override — wingmen blend toward (leader + slot). A build
+  // pulls the flock into formation on its own, so the drop has something
+  // to break.
   if (idx > 0 && !piloted && ship.phase === 'active') {
-    const blend = formation.active ? formation.blendIn : formation.blendOut;
+    const blend = Math.max(
+      formation.active ? formation.blendIn : formation.blendOut,
+      anticipation * MOOD_FLOCK_TIGHTEN,
+    );
     if (blend > 0.001) {
       const leader = ships[0];
       const slot = FORMATION_SLOTS[idx];
@@ -257,6 +273,12 @@ export function updateShip(
       targetX = targetX + (slotX - targetX) * blend;
       targetZ = targetZ + (slotZ - targetZ) * blend;
     }
+  }
+  // The drop scatters the flock: each plane holds a sideways target for a
+  // few seconds, fading back to its wander.
+  if (time < ship.scatterUntil) {
+    const w = Math.min(1, (ship.scatterUntil - time) / MOOD_SCATTER_S * 1.5);
+    targetX = clamp(targetX + ship.scatterX * w, -SHIP_X_BOUND, SHIP_X_BOUND);
   }
   // A leaving plane aims well outside the box so it banks away from the
   // flock; a joining one simply chases its normal target from behind.
@@ -300,7 +322,9 @@ export function updateShip(
     }
   }
   const altWander = terrain.noise3(time * 0.05, ship.wanderSeed + 200, 0) * SHIP_ALT_WANDER;
-  const envelopeY = clamp(envelope + SHIP_CLEARANCE + altWander, SHIP_Y_MIN, SHIP_Y_MAX);
+  // A build lifts the whole flock; the drop lets it dive back down.
+  const lift = anticipation * MOOD_FLOCK_LIFT;
+  const envelopeY = clamp(envelope + SHIP_CLEARANCE + altWander + lift, SHIP_Y_MIN, SHIP_Y_MAX + lift);
   if (envelopeY > ship.cruiseY) {
     ship.cruiseY += (envelopeY - ship.cruiseY) * (1 - Math.exp(-SHIP_ENVELOPE_RISE * dt));
   } else {
@@ -326,6 +350,11 @@ export function updateShip(
   if (leaving) {
     speedCmd = groundFlow - FLOCK_LEAVE_DROP;
     targetPitch = clamp(targetPitch + 0.12, -SHIP_MAX_PITCH, SHIP_MAX_PITCH);
+  }
+
+  // Drop dive: nose down for a beat, then the altitude hold recovers.
+  if (time < ship.diveUntil) {
+    targetPitch = clamp(targetPitch - MOOD_DIVE_PITCH, -SHIP_MAX_PITCH, SHIP_MAX_PITCH);
   }
 
   // Pilot override — only when tracked (chase/cockpit modes).

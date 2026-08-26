@@ -13,7 +13,7 @@ import {
 } from '../constants.ts';
 import type { Dynamics } from '../audio/dynamics.ts';
 import type { CameraSelection } from './modes.ts';
-import { applyCut, pickCinematicMode } from './modes.ts';
+import { applyCut, pickCinematicMode, isModeAvailable } from './modes.ts';
 
 export type Director = {
   cinematicAuto: boolean;
@@ -90,7 +90,13 @@ export function runDirector(
     applyCut(sel, pickCinematicMode(sel, 'rush'), ctx.beatCount);
     director.lastBuildCutAt = now;
   } else if (quietOnset && shotAgeMs > SHOT_MIN_EVENT_MS) {
-    applyCut(sel, pickCinematicMode(sel, 'calm'), ctx.beatCount);
+    // Quiet: more often than not, settle behind the lone leader (chase
+    // ship 1 = mode 5) as the world goes dark around it.
+    const chaseLeader = 5;
+    const target = isModeAvailable(sel, chaseLeader) && Math.random() < 0.65
+      ? chaseLeader
+      : pickCinematicMode(sel, 'calm');
+    applyCut(sel, target, ctx.beatCount);
     director.nextCutMinBeats = ctx.beatCount + 64;
   } else {
     // Beat cadence — long holds. Intensity narrows the interval but never

@@ -18,6 +18,33 @@ export const TERRAIN_BREATH_ATTACK = 14;
 export const TERRAIN_BREATH_RELEASE = 2.8;
 export const TERRAIN_BREATH_AMP = 0.07;
 
+// ----- mood (see scene/mood.ts) -----
+export const MOOD_ANTICIPATION_RISE_S = 1.2;
+export const MOOD_ANTICIPATION_FALL_S = 2.5;
+export const MOOD_FLASH_S = 0.28;          // flash-to-white decay
+export const MOOD_AFTERGLOW_S = 2.2;       // lit sky / wide lens after the drop
+export const MOOD_HUSH_RISE_S = 3.0;       // darkness arrives gently…
+export const MOOD_HUSH_FALL_S = 0.5;       // …light returns at once
+// What anticipation withholds and the drop releases.
+export const MOOD_DIM_BUILD = 0.25;        // exposure fraction removed at full build
+export const MOOD_DIM_HUSH = 0.6;          // terrain brightness removed in full hush
+export const MOOD_FOG_BUILD = 0.35;        // fog range fraction pulled in at full build
+export const MOOD_FLASH_EXPOSURE = 0.5;    // exposure added at the flash peak
+export const MOOD_FLASH_BLOOM = 0.6;       // bloom strength added at the flash peak
+export const MOOD_FOV_AFTERGLOW = 6;       // degrees of extra FOV at the drop
+export const MOOD_CAM_PUSH = 7;            // preset dolly-in (u) at full build
+export const MOOD_CAM_LOWER = 3.5;         // preset height drop (u) at full build
+export const MOOD_FLOCK_TIGHTEN = 0.85;    // formation pull at full build
+export const MOOD_FLOCK_LIFT = 3.0;        // cruise altitude added at full build (u)
+export const MOOD_SCATTER_X = 14;          // lateral scatter impulse at the drop (u)
+export const MOOD_SCATTER_S = 3.0;         // how long the scatter target holds
+export const MOOD_DIVE_S = 1.1;            // dive after the drop
+export const MOOD_DIVE_PITCH = 0.22;       // rad of nose-down during the dive
+
+// ----- mountain ring (see scene/mountains.ts) -----
+export const MOUNTAIN_RADII = [66, 72, 78, 84, 90, 97, 104, 112];
+export const MOUNTAIN_SEGMENTS = 160;
+
 // ----- post-processing -----
 // Bloom RT divisor — half the canvas size keeps bloom roughly the same look
 // at quarter the fragment cost (5-mip pyramid × 2 blurs each).
@@ -32,7 +59,7 @@ export const TERRAIN_ROW_SPACING = DEPTH / (ROWS - 1);
 // ----- ship flight model (kinematic coordinated flight, landscape frame) -----
 export const SHIP_X_BOUND = WIDTH * 0.40;
 export const SHIP_Z_MIN = -16;
-export const SHIP_Z_MAX = 18;
+export const SHIP_Z_MAX = 20;                // close enough to the front presets for near passes, never through them
 export const SHIP_Z_CENTER = (SHIP_Z_MIN + SHIP_Z_MAX) * 0.5;
 export const SHIP_Y_MIN = 1.4;
 export const SHIP_Y_MAX = HEIGHT_SCALE * 1.5 + 1;

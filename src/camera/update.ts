@@ -15,7 +15,7 @@ import * as THREE from 'three';
 import {
   CAM_DRIFT_YAW, CAM_DRIFT_RATE, CAM_DOLLY_LERP,
   CHASE_BACK, CHASE_UP, CHASE_LOOK_UP, CHASE_LOOK_AHEAD, CHASE_POS_LERP, CHASE_LOOK_LERP,
-  CHASE_ROLL_FOLLOW, CHASE_TERRAIN_CLEAR, CAM_BLEND_ARC,
+  CHASE_ROLL_FOLLOW, CHASE_TERRAIN_CLEAR, CAM_BLEND_ARC, MOOD_CAM_PUSH, MOOD_CAM_LOWER,
 } from '../constants.ts';
 import type { CameraSelection } from './modes.ts';
 import type { Orbit } from './orbit.ts';
@@ -73,6 +73,8 @@ export type CameraUpdateInput = {
   buildLevel: number;
   dt: number;
   time: number;
+  /** 0..1 build anticipation — presets creep in and low, released at the drop. */
+  anticipation: number;
   /** Terrain height at a world XZ — keeps the camera above the grid. */
   terrainHeightAt: (x: number, z: number) => number;
 };
@@ -137,8 +139,11 @@ export function updateCamera(
     // fraction of a unit, builds pull back and rise — all on the slow ease.
     const dollyLerp = 1 - Math.exp(-CAM_DOLLY_LERP * input.dt);
     const breathe = Math.sin(input.time * 0.05 + sel.currentIdx) * 0.8;
-    const targetRadius = p.radius + breathe - input.bassEnergy * 0.8 * input.intensity + input.buildLevel * 3;
-    const targetHeight = p.height + input.buildLevel * 1.5;
+    // A build draws the camera in and down toward the grid — the withheld
+    // wide view is what the drop's pull-back releases.
+    const targetRadius = p.radius + breathe - input.bassEnergy * 0.8 * input.intensity
+      - input.anticipation * MOOD_CAM_PUSH;
+    const targetHeight = Math.max(3, p.height - input.anticipation * MOOD_CAM_LOWER);
     orbit.camRadius += (targetRadius - orbit.camRadius) * dollyLerp;
     orbit.camHeight += (targetHeight - orbit.camHeight) * dollyLerp;
     d.pos.set(

@@ -8,7 +8,7 @@ export function createStars(scene: THREE.Scene): THREE.Points {
   const STAR_COUNT = 1200;
   const starPos = new Float32Array(STAR_COUNT * 3);
   for (let i = 0; i < STAR_COUNT; i++) {
-    const r = 90 + Math.random() * 40;
+    const r = 130 + Math.random() * 40; // beyond the mountain ring
     const theta = Math.random() * Math.PI * 2;
     const phi = Math.acos(2 * Math.random() - 1);
     starPos[i * 3]     = r * Math.sin(phi) * Math.cos(theta);

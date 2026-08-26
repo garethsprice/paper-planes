@@ -9,7 +9,9 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-import { BLOOM_DIVISOR } from '../constants.ts';
+import {
+  BLOOM_DIVISOR, MOOD_DIM_BUILD, MOOD_FLASH_EXPOSURE, MOOD_FLASH_BLOOM,
+} from '../constants.ts';
 import type { StereoState } from './stereo.ts';
 import { HybridRenderPass } from './stereo.ts';
 
@@ -59,7 +61,7 @@ export function createRenderPipeline(
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 0.88;
+  renderer.toneMappingExposure = BASE_EXPOSURE;
   // WebXR is enabled lazily by the VR button (see xr/session.ts) — having
   // it on at startup can interfere with the SBS scissor render.
   renderer.xr.setReferenceSpaceType('local-floor');
@@ -89,19 +91,31 @@ export type PostFxInput = {
   bassEnergy: number;
   dropBoost: number;
   stereoEnabled: boolean;
+  /** Mood scalars — see scene/mood.ts. */
+  anticipation: number;
+  flash: number;
+  hush: number;
 };
+
+const BASE_EXPOSURE = 0.88;
 
 /** Per-frame update for bloom strength + chromatic amount. Stereo uses a
  *  much gentler bloom curve to minimise smear across the eye seam, and
  *  disables chromatic entirely (it's radial-from-center and would centre on
  *  the seam). */
 export function updatePostFx(pipeline: RenderPipeline, input: PostFxInput): void {
-  const { intensity: I, bassEnergy, dropBoost, stereoEnabled } = input;
+  const { intensity: I, bassEnergy, dropBoost, stereoEnabled, anticipation, flash, hush } = input;
   const bloomMul = stereoEnabled ? 0.4 : 1.0;
   // Restrained: at-rest 0.18, peaks around 0.5 on a drop. Glow should read
-  // as a halo on the brightest crests, never a wash over the whole grid.
+  // as a halo on the brightest crests, never a wash over the whole grid —
+  // except for the flash, the one moment white is allowed.
   pipeline.bloom.strength =
-    ((0.16 + 0.06 * I) + bassEnergy * 0.10 * I + dropBoost * 0.18) * bloomMul;
+    ((0.16 + 0.06 * I) + bassEnergy * 0.10 * I + dropBoost * 0.18 + flash * MOOD_FLASH_BLOOM) * bloomMul;
+  // A build withholds light; the hush withholds more; the flash gives it
+  // all back for a quarter second.
+  pipeline.renderer.toneMappingExposure =
+    BASE_EXPOSURE * (1 - MOOD_DIM_BUILD * anticipation) * (1 - 0.3 * hush)
+    + flash * MOOD_FLASH_EXPOSURE;
   pipeline.bloom.radius = stereoEnabled ? 0.25 : 0.32;
   pipeline.chromaticPass.enabled = !stereoEnabled;
   if (!stereoEnabled) {

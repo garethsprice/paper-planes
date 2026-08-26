@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {
   COLS, ROWS, HEIGHT_SCALE, NOISE_AMP, BLOOM_DIVISOR, TERRAIN_ROW_SPACING, CAM_BLEND_MANUAL_S,
   TERRAIN_ROW_BLEND, TERRAIN_SWELL, TERRAIN_BREATH_ATTACK, TERRAIN_BREATH_RELEASE, TERRAIN_BREATH_AMP,
+  MOOD_FOG_BUILD, MOOD_DIM_HUSH, MOOD_FOV_AFTERGLOW, MOOD_SCATTER_X,
 } from './constants.ts';
 import { createStereoState } from './render/stereo.ts';
 import { createRenderPipeline, updatePostFx, renderFrame } from './render/pipeline.ts';
@@ -16,7 +17,9 @@ import { createSceneCore } from './scene/core.ts';
 import { createTerrain, sampleLogBin, bilerpHeight } from './scene/terrain.ts';
 import { createStars } from './scene/stars.ts';
 import { createNebula } from './scene/nebula.ts';
-import { createShips, activateFormation, updateShip } from './scene/ship.ts';
+import { createShips, updateShip, scatterShip } from './scene/ship.ts';
+import { createMood, updateMood } from './scene/mood.ts';
+import { createMountains } from './scene/mountains.ts';
 import { createFlock, updateFlock } from './scene/flock.ts';
 import {
   ensureAudio, getAudio, attachStream, loadAudioFile,
@@ -54,6 +57,11 @@ const terrain = createTerrain(sceneCore);
 const { posAttr, heights, noise3, binMap, mirrorMaterial } = terrain;
 const stars = createStars(scene);
 const nebula = createNebula(scene);
+const mountains = createMountains(scene, terrain.noise3);
+const mood = createMood();
+let mountainEnvelope = 0.5; // slow-smoothed flock energy that raises the range
+const FOG_NEAR_BASE = sceneCore.fog.near;
+const FOG_FAR_BASE = sceneCore.fog.far;
 
 // ----- ships + formation flight (factories live in src/scene/ship.ts) -----
 const shipsHandle = createShips(scene);
@@ -215,18 +223,18 @@ const interaction = installInteractionTracking();
 
 // ----- drop response: per-event side effects, fired once when dropCount advances -----
 let lastSeenDropCount = 0;
-let dropFovPulse = 0;        // 0..1, set on a drop and decays; widens the FOV
 let dropFiredThisFrame = false; // consumed by the cinematic director below
 
-function onDrop() {
-  // Formation flight for ~6 seconds (≈8 bars at 120 BPM, 4 bars at 60 BPM —
-  // good enough that the formation is held long enough to read).
-  const ms = bpmHandle.bpm > 0 ? (60 / bpmHandle.bpm) * 1000 * 8 : 6000;
-  activateFormation(formation, ms);
-  // FOV widen pulse — the awe shot (eased in and out, see the loop)
-  dropFovPulse = 1;
+function onDrop(time: number) {
+  // The build has pulled the flock into formation and lifted it; the drop
+  // breaks it — every plane scatters sideways and dives.
+  for (const ship of ships) {
+    if (ship.phase === 'dormant') continue;
+    const side = ship.wanderSeed % 2 < 1 ? -1 : 1;
+    scatterShip(ship, time, side * MOOD_SCATTER_X * (0.5 + 0.5 * Math.abs(Math.sin(ship.wanderSeed))));
+  }
   // The cinematic director (later in the same frame) reads this flag to
-  // hard-cut to a dramatic angle.
+  // glide to a wide reveal.
   dropFiredThisFrame = true;
 }
 
@@ -308,8 +316,11 @@ function animate() {
   dropFiredThisFrame = false;
   if (dynamics.dropCount !== lastSeenDropCount) {
     lastSeenDropCount = dynamics.dropCount;
-    onDrop();
+    onDrop(t);
   }
+  // Mood: anticipation through a build, flash + afterglow at the drop, hush
+  // in quiet. Everything below reads these.
+  updateMood(mood, dynamics, dropFiredThisFrame, fftBins !== null, dt);
 
   // global reactivity scalars derived from dynamics — used throughout the
   // remainder of the frame.
@@ -317,20 +328,17 @@ function animate() {
   const dropBoost = sinceDrop < 1.5 ? Math.exp(-sinceDrop * 2.0) : 0;
   const I = dynamics.intensity;
 
-  // FOV widen pulse on a drop: a few degrees, eased both ways so the lens
-  // breathes rather than snaps.
-  dropFovPulse *= Math.exp(-dt / 1.4);
-  const targetFov = 55 + dropFovPulse * 3.5;
+  // The drop opens the lens for a couple of seconds — the pull-back reveal.
+  const targetFov = 55 + mood.afterglow * MOOD_FOV_AFTERGLOW;
   const newFov = camera.fov + (targetFov - camera.fov) * (1 - Math.exp(-5 * dt));
   if (Math.abs(camera.fov - newFov) > 0.001) {
     camera.fov = newFov;
     camera.updateProjectionMatrix();
   }
 
-  // formation lifecycle: ease blend in/out, expire when window passes
-  if (formation.active && performance.now() > formation.endsAt) {
-    formation.active = false; // stays in blendOut decay until next activation
-  }
+  // Formation is a build behaviour now: the flock draws together as the
+  // anticipation rises and breaks at the drop.
+  formation.active = mood.anticipation > 0.5;
   const formationLerp = 1 - Math.exp(-(formation.active ? 1.7 : 1.2) * dt);
   formation.blendIn += ((formation.active ? 1 : 0) - formation.blendIn) * formationLerp;
   formation.blendOut = formation.blendIn; // single state suffices — blend toward target
@@ -356,6 +364,7 @@ function animate() {
   const shipInput = {
     dt, time: t, groundFlow, level, centroid,
     bassEnergy, beatPulse: bpmHandle.beatPulse, arrowKeys,
+    anticipation: mood.anticipation,
   };
   // Index order matters: wingmen read the leader's target from this frame.
   ships.forEach((ship, i) =>
@@ -382,6 +391,7 @@ function animate() {
     buildLevel: dynamics.build,
     dt,
     time: t,
+    anticipation: mood.anticipation,
     terrainHeightAt: (x, z) => bilerpHeight(terrain, x, z),
   });
 
@@ -395,12 +405,23 @@ function animate() {
   const breathRate = bpmHandle.beatPulse > breath ? TERRAIN_BREATH_ATTACK : TERRAIN_BREATH_RELEASE;
   breath += (bpmHandle.beatPulse - breath) * (1 - Math.exp(-breathRate * dt));
   uniforms.uHeightMul.value = 1.0 + breath * TERRAIN_BREATH_AMP * I;
-  // aurora: phase sweeps slowly (faster on louder sections), intensity
-  // fades to zero during quiet.
+  // aurora: phase sweeps slowly (faster on louder sections). A build
+  // withholds it, the drop ignites the sky, the hush puts it out.
   uniforms.uAuroraPhase.value += (0.4 + I * 0.4) * dt;
-  uniforms.uAuroraIntensity.value = I * 0.28 + dropBoost * 0.18;
+  uniforms.uAuroraIntensity.value =
+    (I * 0.28 + dropBoost * 0.18 + mood.afterglow * 0.35)
+    * (1 - mood.anticipation * 0.8) * (1 - mood.hush);
+  // A build pulls the fog in; the hush sinks the whole grid toward dark.
+  const fogScale = 1 - MOOD_FOG_BUILD * mood.anticipation;
+  sceneCore.fog.near = uniforms.uFogNear.value = FOG_NEAR_BASE * fogScale;
+  sceneCore.fog.far = uniforms.uFogFar.value = FOG_FAR_BASE * fogScale;
+  uniforms.uDim.value = 1 - MOOD_DIM_HUSH * mood.hush;
+  // Distant range breathes with the song's long arc and dims with the hush.
+  mountainEnvelope += (flock.energy - mountainEnvelope) * (1 - Math.exp(-dt / 4));
+  mountains.update(mountainEnvelope, t);
+  mountains.material.uniforms.uLift.value = 1 - 0.55 * mood.hush;
   // mirror world fades down when the scene is quiet
-  mirrorMaterial.uniforms.uOpacity.value = 0.10 * I;
+  mirrorMaterial.uniforms.uOpacity.value = 0.10 * I * (1 - mood.hush);
   // very subtle star parallax (independent of intensity — the cosmos doesn't pause)
   stars.rotation.y += 0.0003;
   // nebula swirls a bit faster on bass; intensity scales the speed-up
@@ -417,12 +438,15 @@ function animate() {
   const bpmHue = Math.max(-0.05, Math.min(0.05, (tempoForHue - 120) / 60 * 0.05));
   uniforms.uHueShift.value = (bpmHue + Math.sin(t * 0.07) * 0.04) * (0.4 + 0.6 * I);
 
-  updatePostFx(pipeline, { intensity: I, bassEnergy, dropBoost, stereoEnabled: stereo.enabled });
+  updatePostFx(pipeline, {
+    intensity: I, bassEnergy, dropBoost, stereoEnabled: stereo.enabled,
+    anticipation: mood.anticipation, flash: mood.flash, hush: mood.hush,
+  });
 
   // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
   bpmHandle.beatPulse *= Math.exp(-9 * dt); // visible for ~150ms after each peak
   updateBpmReadout({ uiEl, bpmNumEl, bpmDotEl, dbgEl }, bpmHandle);
-  updateDebugPanel(dbgEl, dynamics, formation, dropBoost, flock);
+  updateDebugPanel(dbgEl, dynamics, formation, dropBoost, flock, mood);
 
   renderFrame(pipeline, scene, camera, dt);
 }
