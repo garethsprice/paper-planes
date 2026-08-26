@@ -36,7 +36,6 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
   uniform float uTime;
   uniform float uFogNear;
   uniform float uFogFar;
-  uniform vec3 uFogColor;
   uniform float uHeightScale;
   uniform float uHueShift;
   uniform float uOpacity;
@@ -106,9 +105,9 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
       col = hsv2rgb(hsv);
     }
 
-    // fade old rows toward black for depth
+    // old rows dissolve (applied as alpha below, never as black — a black
+    // line would silhouette against the mountains and the sky glow)
     float ageFade = 1.0 - smoothstep(0.55, 1.0, vRowAge);
-    col *= ageFade;
 
     // aurora band — slow horizontal wash that sweeps across the X axis,
     // distinct from the height gradient. Hidden during quiet sections.
@@ -121,7 +120,7 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
         vec3(0.0, 0.9, 0.4),
         0.5 + 0.5 * sin(uAuroraPhase * 0.7)
       );
-      col += auroraColor * auroraBand * uAuroraIntensity * ageFade;
+      col += auroraColor * auroraBand * uAuroraIntensity;
     }
 
     // horizon light: the side of the grid toward the sun takes a warm wash
@@ -130,15 +129,12 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
     float facing = clamp(dot(normalize(vWorldXZ + vec2(0.0001)), lz) * 0.5 + 0.5, 0.0, 1.0);
     col = mix(col, col * (uSunColor * 1.5 + 0.25), 0.3 * facing * facing * uSun);
 
-    // hush: the whole grid sinks toward dark, leaving the stars and the
-    // lone plane
-    col *= uDim;
-
-    // distance fog
+    // Distance fog, row age and the hush all thin the line out rather than
+    // darkening it, so the grid disappears into what lies behind it.
     float fogF = smoothstep(uFogNear, uFogFar, vViewDist);
-    col = mix(col, uFogColor, fogF);
+    float alpha = uOpacity * ageFade * (1.0 - fogF) * uDim;
 
-    gl_FragColor = vec4(col, uOpacity);
+    gl_FragColor = vec4(col, alpha);
   }
 `;
 
@@ -197,7 +193,7 @@ export function createTerrain(core: SceneCore): Terrain {
 
   const material = new THREE.ShaderMaterial({
     uniforms: mainUniforms,
-    transparent: false, // depth writes preserved on the real grid
+    transparent: true,  // fades are alpha; depth writes stay on for the real grid
     vertexShader: TERRAIN_VERTEX_SHADER,
     fragmentShader: TERRAIN_FRAGMENT_SHADER,
   });
