@@ -77,8 +77,19 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
     float h = clamp(vHeight / uHeightScale, 0.0, 1.0);
     vec3 col = grade(h);
 
-    // brightness boost on peaks → bloom catches them
-    col *= 0.8 + 1.6 * h;
+    // gentle lift on peaks so the brightest crests just clear the bloom
+    // threshold. The old 0.8 + 1.6h pushed peaks to 2.4× — everything
+    // bloomed into a white wall.
+    col *= 0.6 + 0.85 * h;
+
+    // glimmer: tiny glints that drift along the lines — two slow-moving
+    // interference patterns, raised to a high power so only their crossings
+    // light up, scaled by height so the crests sparkle and the floor stays
+    // calm. Subtle by design; it should read as shimmer, not strobe.
+    float g1 = sin(vWorldXZ.x * 2.9 + uTime * 1.7) * sin(vWorldXZ.y * 2.3 - uTime * 1.1);
+    float g2 = sin(vWorldXZ.x * 1.3 - uTime * 0.9 + vWorldXZ.y * 1.9);
+    float glint = pow(max(0.0, g1), 10.0) * (0.5 + 0.5 * g2);
+    col += col * glint * (0.25 + 0.75 * h) * 0.9;
 
     // iridescent hue: BPM offset + position+time noise (oil-slick shimmer)
     float hueNoise =

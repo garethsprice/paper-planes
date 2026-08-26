@@ -1,47 +1,73 @@
-// Rapier-backed flight model. Each ship is a dynamic rigid body driven by four
-// forces (thrust, drag, lift, gravity) plus PD attitude torques. Per frame:
-//   1. updateShipControls() — read body state, pick a wander/pilot target, queue
-//      forces and torques (no state mutations beyond cached fields).
-//   2. main.ts calls world.step() once for all bodies.
-//   3. syncShipFromBody() — copy body translation/rotation into the Three.js
-//      group, run terrain hard-clear, Z-wrap, X-bounce, refresh ship.heading.
-// The split keeps force queueing deterministic and lets every body see the same
-// pre-step world state.
+// Kinematic coordinated-flight model in the landscape's reference frame.
+//
+// The spectrogram streams toward −Z one grid row per frame, so the ground is
+// a conveyor. A plane's velocity over that ground must equal its airspeed
+// vector — so each frame a ship moves along its nose by speed·dt *and* is
+// carried −Z by exactly one row. To hold station it flies into the flow (+Z)
+// at airspeed ≈ flow; it cannot circle (it would be swept away) and every
+// visible motion is the physical consequence of bank, pitch and throttle:
+//   bank → coordinated turn (ω = g·tan φ / v) → heading deviates → lateral drift
+//   pitch → climb/dive along the path (dives speed up, climbs bleed speed)
+//   throttle → surge forward / fall back against the flow
+//
+// Per frame, updateShip():
+//   1. picks a wander/formation target (noise + spectral centroid),
+//   2. commands bank from lateral guidance, pitch from altitude error,
+//      airspeed from Z station-keeping plus the music,
+//   3. eases roll/pitch/speed toward those commands (rate-limited, first-order),
+//   4. integrates heading, position (nose motion − flow advection),
+//   5. enforces the terrain floor and X/Z bounds, and writes the mesh transform.
 
 import * as THREE from 'three';
-import RAPIER from '@dimforge/rapier3d-compat';
 import {
   SHIP_X_BOUND, SHIP_Z_MIN, SHIP_Z_MAX, SHIP_Z_CENTER,
   SHIP_Y_MIN, SHIP_Y_MAX, SHIP_CLEARANCE, SHIP_HARD_CLEAR,
   SHIP_LOOKAHEAD_DIST,
   SHIP_MAX_BANK, SHIP_MAX_PITCH,
-  SHIP_THRUST_BASE, SHIP_THRUST_BOOST, SHIP_THRUST_BEAT,
-  SHIP_DRAG_K, SHIP_LIFT_K, SHIP_CL_SLOPE, SHIP_CL_MAX, SHIP_GRAVITY,
-  SHIP_HEADING_TO_BANK, SHIP_ALT_TO_PITCH, SHIP_PITCH_VY_DAMP,
-  SHIP_YAW_RATE, SHIP_PITCH_LERP, SHIP_ROLL_LERP,
-  FORMATION_SLOTS,
+  SHIP_SURGE_Z_GAIN, SHIP_SURGE_MAX, SHIP_SURGE_BASS, SHIP_SURGE_BEAT,
+  SHIP_SPEED_LERP, SHIP_SPEED_MIN, SHIP_GRAVITY_PATH, SHIP_TURN_G,
+  SHIP_LAT_GAIN, SHIP_LAT_MAX, SHIP_HEADING_TO_BANK, SHIP_YAW_DAMP,
+  SHIP_ROLL_RATE, SHIP_ROLL_LERP, SHIP_PITCH_LERP,
+  SHIP_ALT_GAIN, SHIP_VY_MAX, SHIP_ALT_WANDER, SHIP_VISUAL_AOA,
+  SHIP_ENVELOPE_RISE, SHIP_ENVELOPE_SINK,
+  SHIP_ACCEL_TO_PITCH, SHIP_ACCEL_TO_NOSE, SHIP_ACCEL_SMOOTH_S,
+  TERRAIN_ROW_SPACING,
+  FORMATION_SLOTS, SHIP_MAX,
+  FLOCK_JOIN_SURGE, FLOCK_LEAVE_DROP, FLOCK_FADE_S,
 } from '../constants.ts';
 import { bilerpHeight, type Terrain } from './terrain.ts';
-import { addShipBody, type Physics } from './physics.ts';
+
+/** Flock membership. dormant ships are hidden and skipped; joining ships
+ *  surge in from behind; leaving ships throttle back, bank outward and
+ *  fade as the landscape carries them away. */
+export type ShipPhase = 'dormant' | 'joining' | 'active' | 'leaving';
 
 export type Ship = {
   group: THREE.Group;
-  body: RAPIER.RigidBody;
-  /** Kinematic attitude state (YXZ Euler order). Each frame the autopilot
-   *  computes targets and these lerp toward them at controlled rates, then we
-   *  setRotation() on the body. Linear motion stays dynamic — forces (thrust,
-   *  drag, lift, gravity) still integrate via Rapier — but attitude no longer
-   *  fights itself in a PD loop. */
+  phase: ShipPhase;
+  /** 0..1 opacity, eased during join/leave. */
+  fade: number;
+  /** Which way (±X) a leaving ship peels away. */
+  leaveSide: number;
+  edgeMaterial: THREE.LineBasicMaterial;
+  panelMaterial: THREE.MeshBasicMaterial;
+  /** Yaw (rad). Body-forward is local −Z, so heading π flies into the flow (+Z). */
   heading: number;
+  /** Flight-path angle (rad), positive = climbing. */
   pitch: number;
+  /** Bank (rad), positive = left wing down = turning left (heading increases). */
   roll: number;
+  /** Airspeed along the nose (world units / s). */
+  speed: number;
+  /** Smoothed along-path acceleration (u/s²) — pitches the nose. */
+  accel: number;
+  /** Slow-relaxing cruise altitude: rises quickly onto a loud passage's
+   *  terrain envelope, sinks gently after it. See updateShip. */
+  cruiseY: number;
   wanderSeed: number;
   /** Last frame's wander target — wingmen read the leader's value during formation. */
   lastTargetX: number;
   lastTargetZ: number;
-  /** Z teleport applied this frame by the wrap logic; chase camera adds it
-   *  to its position so the framing doesn't jolt when the wrap fires. */
-  zWrapDelta: number;
 };
 
 export type Formation = {
@@ -56,23 +82,25 @@ export type Ships = {
   list: Ship[];
   formation: Formation;
   geometry: THREE.BufferGeometry;
-  material: THREE.LineBasicMaterial;
+  panelGeometry: THREE.BufferGeometry;
 };
+
+// Shared wedge vertices — the edge outline and the paper panels index into
+// the same five points.
+const SHIP_VERTS = new Float32Array([
+   0,      0,   -1.6,   // 0: nose tip — long, prominent
+  -0.65,   0,    0.6,   // 1: back-left wing tip
+   0,      0,    0.3,   // 2: back-notch (top of rear face)
+   0.65,   0,    0.6,   // 3: back-right wing tip
+   0,     -0.5,  0.3,   // 4: keel-tail (bottom of rear face)
+]);
 
 function buildShipGeometry(): THREE.BufferGeometry {
   // Long sharp nose at local −Z (three.js camera convention: body_forward =
   // (0,0,−1)). Wings are short and swept back so the silhouette unambiguously
-  // points forward — the previous near-symmetric proportions let the eye read
-  // the wing edge as the nose, which is what looked like "going backwards".
+  // points forward.
   const geom = new THREE.BufferGeometry();
-  const v = new Float32Array([
-     0,      0,   -1.6,   // 0: nose tip — long, prominent
-    -0.65,   0,    0.6,   // 1: back-left wing tip
-     0,      0,    0.3,   // 2: back-notch (top of rear face)
-     0.65,   0,    0.6,   // 3: back-right wing tip
-     0,     -0.5,  0.3,   // 4: keel-tail (bottom of rear face)
-  ]);
-  geom.setAttribute('position', new THREE.BufferAttribute(v, 3));
+  geom.setAttribute('position', new THREE.BufferAttribute(SHIP_VERTS, 3));
   geom.setIndex([
     0, 1,  1, 2,  2, 3,  3, 0,  // top outline
     0, 4,                        // diagonal belly seam
@@ -82,51 +110,81 @@ function buildShipGeometry(): THREE.BufferGeometry {
   return geom;
 }
 
+/** Translucent paper panels filling the wedge. Their only job is
+ *  legibility: a bare wireframe plane vanishes against the bright grid
+ *  behind it, whereas a dim, slightly see-through body occludes the lines
+ *  and gives the eye a silhouette — like frosted paper against neon. */
+function buildShipPanels(): THREE.BufferGeometry {
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(SHIP_VERTS, 3));
+  geom.setIndex([
+    0, 1, 2,  0, 2, 3,   // top wing surfaces
+    0, 4, 1,  0, 3, 4,   // belly panels down to the keel
+    1, 4, 2,  2, 4, 3,   // rear face
+  ]);
+  return geom;
+}
+
 function makeShip(
   scene: THREE.Scene,
-  physics: Physics,
   geom: THREE.BufferGeometry,
-  mat: THREE.LineBasicMaterial,
+  panelGeom: THREE.BufferGeometry,
   seed: number,
   x0: number,
   z0: number,
+  present: boolean,
 ): Ship {
+  // Materials are per ship so each can fade independently. Edges: glowing
+  // near-white. Panels: deep blue-black, mostly opaque, depthWrite on so
+  // grid lines behind the body are hidden rather than blended through;
+  // added first so the outline always draws on top.
+  const edgeMaterial = new THREE.LineBasicMaterial({
+    color: 0xeaffff, fog: false, transparent: true, opacity: present ? 1 : 0,
+  });
+  const panelMaterial = new THREE.MeshBasicMaterial({
+    color: 0x0b1024,
+    transparent: true,
+    opacity: present ? 0.82 : 0,
+    side: THREE.DoubleSide,
+    fog: false,
+  });
   const group = new THREE.Group();
-  // Body quaternion drives the group directly now — no Euler order constraint.
-  group.add(new THREE.LineSegments(geom, mat));
+  group.add(new THREE.Mesh(panelGeom, panelMaterial));
+  group.add(new THREE.LineSegments(geom, edgeMaterial));
   group.position.set(x0, 4, z0);
+  group.visible = present;
   scene.add(group);
-  const body = addShipBody(physics, x0, 4, z0);
-  // Seed near-cruise forward velocity along body-forward (-Z) + 8° nose-up so
-  // the wing carries weight from frame 1 (zero AoA at startup = zero lift =
-  // immediate stall).
-  body.setLinvel({ x: 0, y: 0, z: -5 }, true);
-  body.setRotation({ x: 0.0697, y: 0, z: 0, w: 0.9976 }, true);
   return {
     group,
-    body,
-    heading: 0,
-    pitch: 0.14, // matches the 8° initial body rotation set above
+    phase: present ? 'active' : 'dormant',
+    fade: present ? 1 : 0,
+    leaveSide: 1,
+    edgeMaterial,
+    panelMaterial,
+    heading: Math.PI, // nose into the flow
+    pitch: 0,
     roll: 0,
+    speed: 20,
+    accel: 0,
+    cruiseY: 4,
     wanderSeed: seed,
     lastTargetX: x0,
     lastTargetZ: z0,
-    zWrapDelta: 0,
   };
 }
 
-export function createShips(scene: THREE.Scene, physics: Physics): Ships {
+/** All SHIP_MAX ships are created up front; only the leader starts present.
+ *  The flock controller (scene/flock.ts) wakes and retires the rest. */
+export function createShips(scene: THREE.Scene): Ships {
   const geometry = buildShipGeometry();
-  const material = new THREE.LineBasicMaterial({ color: 0xeaffff, fog: false });
-  const list = [
-    makeShip(scene, physics, geometry, material, 13.7, 0, SHIP_Z_CENTER),
-    makeShip(scene, physics, geometry, material, 67.3, -10, SHIP_Z_CENTER + 4),
-    makeShip(scene, physics, geometry, material, 141.9, 10, SHIP_Z_CENTER - 4),
-  ];
+  const panelGeometry = buildShipPanels();
+  const list = Array.from({ length: SHIP_MAX }, (_, i) =>
+    makeShip(scene, geometry, panelGeometry, 13.7 + i * 53.6, 0, SHIP_Z_CENTER, i === 0),
+  );
   const formation: Formation = {
     active: false, startedAt: 0, endsAt: 0, blendIn: 0, blendOut: 0,
   };
-  return { list, formation, geometry, material };
+  return { list, formation, geometry, panelGeometry };
 }
 
 export function activateFormation(formation: Formation, durationMs: number): void {
@@ -147,6 +205,8 @@ function wrapAngle(a: number): number {
 export type ShipUpdateInput = {
   dt: number;
   time: number;
+  /** Ground flow speed (u/s) — how fast the landscape streams past. */
+  groundFlow: number;
   level: number;
   centroid: number;
   bassEnergy: number;
@@ -155,67 +215,39 @@ export type ShipUpdateInput = {
 };
 
 // Reused per-frame scratch — Three.js objects are heavy to allocate.
-const _q = new THREE.Quaternion();
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
-const _forward = new THREE.Vector3();
-const _up = new THREE.Vector3();
 
-/** Queue forces + torques on the ship's body. Does not advance the world or
- *  mutate body translation/rotation — those happen during world.step() and
- *  syncShipFromBody() respectively. */
-export function updateShipControls(
+/** Advance one ship by dt and write its mesh transform. Ships must be
+ *  updated in index order: wingmen read the leader's target from this frame.
+ *  `piloted` ships (chase/cockpit) accept arrow-key overrides and skip
+ *  formation so the stick is never fought. */
+export function updateShip(
   ship: Ship,
   idx: number,
   ships: Ship[],
   formation: Formation,
   terrain: Terrain,
   input: ShipUpdateInput,
-  tracked: boolean,
+  piloted: boolean,
 ): void {
-  const { dt, time, centroid, bassEnergy, beatPulse, arrowKeys } = input;
+  if (ship.phase === 'dormant') return;
+  const { dt, time, groundFlow, centroid, bassEnergy, beatPulse, arrowKeys } = input;
+  const p = ship.group.position;
+  const leaving = ship.phase === 'leaving';
 
-  const body = ship.body;
-  const tr = body.translation();
-  const vel = body.linvel();
-
-  // Attitude is *kinematic* — we don't read it from the body; ship.heading/
-  // pitch/roll are our source of truth and we'll setRotation() at the end.
-  const heading = ship.heading;
-  const pitch = ship.pitch;
-  const roll = ship.roll;
-
-  // Build forward/up vectors from the kinematic Euler so we can compute lift,
-  // thrust direction, and AoA against the current attitude. body-forward is
-  // local -Z (three.js camera convention).
-  _euler.set(pitch, heading, roll, 'YXZ');
-  _q.setFromEuler(_euler);
-  _forward.set(0, 0, -1).applyQuaternion(_q);
-  _up.set(0, 1, 0).applyQuaternion(_q);
-
-  // ----- wander target (same scheme as the previous kinematic model) -----
-  let targetX: number;
-  let targetZ: number;
-  if (tracked) {
-    // Aim at a point past the +Z bound so heading sits near π (body-forward
-    // = -Z, so flying +Z means heading=π). The Z-wrap teleports the plane back
-    // to −Z when it reaches the wall, so it never has to U-turn.
-    const drift = terrain.noise3(time * 0.02, ship.wanderSeed, 0) * 3.0;
-    targetX = clamp(drift, -SHIP_X_BOUND, SHIP_X_BOUND);
-    targetZ = SHIP_Z_MAX + 8;
-  } else {
-    // Wander noise multipliers were halved so the target drifts slowly enough
-    // for the plane to actually track it. Faster noise → constantly turning.
-    const wanderX = terrain.noise3(time * 0.035, ship.wanderSeed, 0) * SHIP_X_BOUND;
-    const wanderZ =
-      terrain.noise3(time * 0.03, ship.wanderSeed + 100, 0) *
-        (SHIP_Z_MAX - SHIP_Z_MIN) * 0.45 +
-      SHIP_Z_CENTER;
-    const centroidShift = (centroid - 0.5) * 2 * SHIP_X_BOUND * 0.5;
-    targetX = clamp(wanderX * 0.55 + centroidShift * 0.6, -SHIP_X_BOUND, SHIP_X_BOUND);
-    targetZ = clamp(wanderZ, SHIP_Z_MIN, SHIP_Z_MAX);
-  }
+  // ----- wander target -----
+  // Slow noise so the target drifts gently enough for the plane to actually
+  // settle on it — faster noise means the plane is forever mid-correction.
+  const wanderX = terrain.noise3(time * 0.035, ship.wanderSeed, 0) * SHIP_X_BOUND;
+  const wanderZ =
+    terrain.noise3(time * 0.03, ship.wanderSeed + 100, 0) *
+      (SHIP_Z_MAX - SHIP_Z_MIN) * 0.45 +
+    SHIP_Z_CENTER;
+  const centroidShift = (centroid - 0.5) * 2 * SHIP_X_BOUND * 0.5;
+  let targetX = clamp(wanderX * 0.55 + centroidShift * 0.6, -SHIP_X_BOUND, SHIP_X_BOUND);
+  let targetZ = clamp(wanderZ, SHIP_Z_MIN, SHIP_Z_MAX);
   // Formation override — wingmen blend toward (leader + slot).
-  if (idx > 0 && !tracked) {
+  if (idx > 0 && !piloted && ship.phase === 'active') {
     const blend = formation.active ? formation.blendIn : formation.blendOut;
     if (blend > 0.001) {
       const leader = ships[0];
@@ -226,196 +258,165 @@ export function updateShipControls(
       targetZ = targetZ + (slotZ - targetZ) * blend;
     }
   }
+  // A leaving plane aims well outside the box so it banks away from the
+  // flock; a joining one simply chases its normal target from behind.
+  if (leaving) targetX = ship.leaveSide * (SHIP_X_BOUND + 14);
   ship.lastTargetX = targetX;
   ship.lastTargetZ = targetZ;
 
-  // ----- cruise altitude (terrain follow, no audio lift) -----
-  const fwdXZmag = Math.hypot(_forward.x, _forward.z) || 1;
-  const fwdXn = _forward.x / fwdXZmag;
-  const fwdZn = _forward.z / fwdXZmag;
-  const aheadX = tr.x + fwdXn * SHIP_LOOKAHEAD_DIST;
-  const aheadZ = tr.z + fwdZn * SHIP_LOOKAHEAD_DIST;
-  const tHere = bilerpHeight(terrain, tr.x, tr.z);
-  const tAhead = bilerpHeight(terrain, aheadX, aheadZ);
-  const cruiseY = Math.min(
-    SHIP_Y_MAX,
-    Math.max(Math.max(tHere, tAhead) + SHIP_CLEARANCE, SHIP_Y_MIN),
-  );
-
-  // ----- desired attitude -----
-  // Bank into the turn. Bound the heading error to ±π/2 before applying gain:
-  // a 180° error otherwise commands max bank instantly, and the plane barrel-
-  // rolls instead of turning. With this cap the worst-case bank command is
-  // (π/2)·HEADING_TO_BANK regardless of how badly the heading is off.
-  const dx = targetX - tr.x;
-  const dz = targetZ - tr.z;
-  const desiredHeading = Math.atan2(-dx, -dz);
-  const headingErr = wrapAngle(desiredHeading - heading);
-  const headingErrBounded = clamp(headingErr, -Math.PI / 2, Math.PI / 2);
+  // ----- bank command from lateral guidance -----
+  // Desired sideways speed from X error, turned into a heading deviation
+  // from straight-into-the-flow. Bank is commanded from the heading error,
+  // damped on the current turn rate so it rolls out before the heading
+  // arrives rather than sailing through it.
+  const turnRate = (SHIP_TURN_G / ship.speed) * Math.tan(ship.roll);
+  const vxDes = clamp((targetX - p.x) * SHIP_LAT_GAIN, -SHIP_LAT_MAX, SHIP_LAT_MAX);
+  const vzAir = Math.sqrt(Math.max(1, ship.speed * ship.speed - vxDes * vxDes));
+  const desiredHeading = Math.atan2(-vxDes, -vzAir);
+  const headingErr = wrapAngle(desiredHeading - ship.heading);
   let targetRoll = clamp(
-    headingErrBounded * SHIP_HEADING_TO_BANK,
+    (headingErr - turnRate * SHIP_YAW_DAMP) * SHIP_HEADING_TO_BANK,
     -SHIP_MAX_BANK, SHIP_MAX_BANK,
   );
 
-  // Forward airspeed (projection of velocity on body-forward). Needed for both
-  // the trim calc below and the lift block further down.
-  const vDotFwd = vel.x * _forward.x + vel.y * _forward.y + vel.z * _forward.z;
-
-  // Climb/dive: targetPitch = AoA needed to balance gravity at current speed
-  //              + proportional altitude correction
-  //              − phugoid damper (vertical-velocity feedback).
-  // The trim term is what makes level flight possible: at altErr=0 the plane
-  // still needs positive AoA to generate enough lift to cancel gravity. Solve
-  // K_lift · CL_slope · α · v² = g for α. Cap v² to avoid huge α at low speed
-  // (where the plane is going to stall anyway).
-  const vFwdSqClamped = Math.max(4, vDotFwd * vDotFwd);
-  const aoaTrim = SHIP_GRAVITY / (SHIP_LIFT_K * SHIP_CL_SLOPE * vFwdSqClamped);
-  const altErr = cruiseY - tr.y;
+  // ----- pitch command from altitude error -----
+  // The terrain streams past far faster than the plane could ever contour
+  // it, so the plane rides a slow *envelope*: the highest terrain in a patch
+  // ahead and to either side, which cruiseY climbs onto quickly and sinks
+  // away from gently. Loud passages lift the whole flight; quiet ones let it
+  // drift back down to skim the grid. A slow noise offset keeps the line
+  // from going flat.
+  const fwdX = -Math.sin(ship.heading);
+  const fwdZ = -Math.cos(ship.heading);
+  const rightX = fwdZ;
+  const rightZ = -fwdX;
+  let envelope = -Infinity;
+  for (let i = 0; i <= 4; i++) {
+    const ax = p.x + fwdX * SHIP_LOOKAHEAD_DIST * i * 0.25;
+    const az = p.z + fwdZ * SHIP_LOOKAHEAD_DIST * i * 0.25;
+    for (let side = -1; side <= 1; side++) {
+      const h = bilerpHeight(terrain, ax + rightX * side * 2, az + rightZ * side * 2);
+      if (h > envelope) envelope = h;
+    }
+  }
+  const altWander = terrain.noise3(time * 0.05, ship.wanderSeed + 200, 0) * SHIP_ALT_WANDER;
+  const envelopeY = clamp(envelope + SHIP_CLEARANCE + altWander, SHIP_Y_MIN, SHIP_Y_MAX);
+  if (envelopeY > ship.cruiseY) {
+    ship.cruiseY += (envelopeY - ship.cruiseY) * (1 - Math.exp(-SHIP_ENVELOPE_RISE * dt));
+  } else {
+    ship.cruiseY = Math.max(envelopeY, ship.cruiseY - SHIP_ENVELOPE_SINK * dt);
+  }
+  // Command a vertical *speed* proportional to the error, then the path
+  // angle that produces it at the current airspeed. Because the loop is
+  // closed on velocity (not on pitch directly) it settles without a phugoid.
+  const vyDes = clamp((ship.cruiseY - p.y) * SHIP_ALT_GAIN, -SHIP_VY_MAX, SHIP_VY_MAX);
   let targetPitch = clamp(
-    aoaTrim + altErr * SHIP_ALT_TO_PITCH - vel.y * SHIP_PITCH_VY_DAMP,
+    Math.asin(clamp(vyDes / ship.speed, -0.9, 0.9)),
     -SHIP_MAX_PITCH, SHIP_MAX_PITCH,
   );
 
+  // ----- airspeed command -----
+  // Cruise at the ground flow (station), surge to close Z error, and let the
+  // music push: bass drives the flock forward, a beat gives a nudge.
+  const surge = clamp((targetZ - p.z) * SHIP_SURGE_Z_GAIN, -SHIP_SURGE_MAX, SHIP_SURGE_MAX);
+  let speedCmd = groundFlow + surge + bassEnergy * SHIP_SURGE_BASS + beatPulse * SHIP_SURGE_BEAT;
+  // Arrivals catch up hard from behind; departures shed speed and lift
+  // their nose so the flow carries them up and away.
+  if (ship.phase === 'joining') speedCmd += FLOCK_JOIN_SURGE;
+  if (leaving) {
+    speedCmd = groundFlow - FLOCK_LEAVE_DROP;
+    targetPitch = clamp(targetPitch + 0.12, -SHIP_MAX_PITCH, SHIP_MAX_PITCH);
+  }
+
   // Pilot override — only when tracked (chase/cockpit modes).
-  if (tracked) {
+  if (piloted) {
     const rollCmd = (arrowKeys.left ? 1 : 0) - (arrowKeys.right ? 1 : 0);
     const pitchCmd = (arrowKeys.up ? 1 : 0) - (arrowKeys.down ? 1 : 0);
     if (rollCmd !== 0) targetRoll = rollCmd * SHIP_MAX_BANK;
     if (pitchCmd !== 0) targetPitch = pitchCmd * SHIP_MAX_PITCH;
   }
 
-  // ----- forces -----
-  // Thrust along body-forward, audio-modulated.
-  const thrust = SHIP_THRUST_BASE
-    + bassEnergy * SHIP_THRUST_BOOST
-    + beatPulse * SHIP_THRUST_BEAT;
-  const speed3 = Math.hypot(vel.x, vel.y, vel.z);
-  // Drag opposite velocity, quadratic: F = -K · |v| · v
-  const dragK = SHIP_DRAG_K * speed3;
-
-  // Lift uses an AoA-bounded CL — the previous K·|v|² along body-up generated
-  // runaway lift at any speed above cruise. Here:
-  //   AoA = angle from velocity to body-forward, in the body's pitch plane.
-  //         Positive AoA = nose above the airflow (typical for level cruise).
-  //   CL  = clamp(slope · AoA, ±CL_MAX) — linear up to stall, then saturated.
-  //   |L| = K_lift · CL · |v|², direction along body-up.
-  // Self-limits: as the plane climbs, the velocity vector rotates up, AoA
-  // shrinks, CL shrinks → the plane can't keep accelerating skyward.
-  let liftMag = 0;
-  if (vDotFwd > 0.5) {
-    const vDotUp = vel.x * _up.x + vel.y * _up.y + vel.z * _up.z;
-    const aoa = Math.atan2(-vDotUp, vDotFwd);
-    const CL = clamp(aoa * SHIP_CL_SLOPE, -SHIP_CL_MAX, SHIP_CL_MAX);
-    // Lift uses *forward* airspeed only — if the plane is moving vertically
-    // (e.g. mid-bounce), |v| would be large but the wing isn't generating
-    // lift against the airflow direction. v_forward² also self-zeros when
-    // the plane is going backwards (vDotFwd < 0).
-    const liftCap = 1.5 * SHIP_GRAVITY;
-    liftMag = clamp(SHIP_LIFT_K * CL * vDotFwd * vDotFwd, -liftCap, liftCap);
-  }
-
-  body.addForce(
-    {
-      x: _forward.x * thrust - dragK * vel.x + _up.x * liftMag,
-      y: _forward.y * thrust - dragK * vel.y + _up.y * liftMag,
-      z: _forward.z * thrust - dragK * vel.z + _up.z * liftMag,
-    },
-    true,
+  // ----- acceleration → nose -----
+  // Speed eases toward the command; gravity along the path adds the
+  // paper-plane feel — dives pick up pace, climbs bleed it. The resulting
+  // acceleration is smoothed and fed back into pitch: accelerating drops
+  // the nose (the plane dives for its speed), decelerating flares it up.
+  const accelRaw =
+    (speedCmd - ship.speed) * SHIP_SPEED_LERP - SHIP_GRAVITY_PATH * Math.sin(ship.pitch);
+  ship.accel += (accelRaw - ship.accel) * (1 - Math.exp(-dt / SHIP_ACCEL_SMOOTH_S));
+  targetPitch = clamp(
+    targetPitch - ship.accel * SHIP_ACCEL_TO_PITCH,
+    -SHIP_MAX_PITCH, SHIP_MAX_PITCH,
   );
 
-  // ----- kinematic attitude -----
-  // Heading follows the *velocity vector* so the mesh always points where the
-  // plane is actually moving — no more visual strafing. Banking still turns
-  // the plane: rolled lift produces sideways force → velocity acquires a
-  // sideways component → heading swings to match. The autopilot's heading
-  // error feeds the roll command (above), not yaw directly. Pitch and roll
-  // lerp toward their autopilot targets as before.
-  const hvel = Math.hypot(vel.x, vel.z);
-  if (hvel > 0.5) {
-    // body-forward is -Z. atan2(-vx, -vz) is the yaw whose body-forward axis
-    // points along the velocity vector.
-    const velHeading = Math.atan2(-vel.x, -vel.z);
-    const headingLerp = 1 - Math.exp(-SHIP_YAW_RATE * dt);
-    ship.heading = wrapAngle(heading + wrapAngle(velHeading - heading) * headingLerp);
-  }
-  const pitchLerp = 1 - Math.exp(-SHIP_PITCH_LERP * dt);
+  // ----- ease attitude + speed toward commands -----
+  // Roll is first-order with a rate cap, so a large heading error rolls in
+  // at a steady, visible pace instead of snapping to full bank.
   const rollLerp = 1 - Math.exp(-SHIP_ROLL_LERP * dt);
-  ship.pitch = pitch + (targetPitch - pitch) * pitchLerp;
-  ship.roll = roll + (targetRoll - roll) * rollLerp;
+  const rollMaxStep = SHIP_ROLL_RATE * dt;
+  ship.roll += clamp((targetRoll - ship.roll) * rollLerp, -rollMaxStep, rollMaxStep);
+  const pitchLerp = 1 - Math.exp(-SHIP_PITCH_LERP * dt);
+  ship.pitch += (targetPitch - ship.pitch) * pitchLerp;
+  ship.speed = Math.max(SHIP_SPEED_MIN, ship.speed + accelRaw * dt);
 
-  _euler.set(ship.pitch, ship.heading, ship.roll, 'YXZ');
-  _q.setFromEuler(_euler);
-  body.setRotation({ x: _q.x, y: _q.y, z: _q.z, w: _q.w }, true);
-  // Zero angVel so any residual angular motion from physics resolution can't
-  // accumulate — rotation is fully kinematic.
-  body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  // ----- integrate -----
+  // Coordinated turn: bank → turn rate. Positive roll = left bank = heading
+  // increases (body-forward −Z rotates toward −X).
+  ship.heading = wrapAngle(ship.heading + turnRate * dt);
+  // Nose motion plus advection: the landscape carries the plane −Z by one
+  // grid row per frame, exactly as it carries the terrain.
+  const cosP = Math.cos(ship.pitch);
+  const step = ship.speed * dt;
+  p.x += -Math.sin(ship.heading) * cosP * step;
+  p.y += Math.sin(ship.pitch) * step;
+  p.z += -Math.cos(ship.heading) * cosP * step - TERRAIN_ROW_SPACING;
 
-  ship.zWrapDelta = 0;
-}
-
-/** Post-step: copy body state into the Three.js group, enforce terrain floor
- *  and X / Z bounds, refresh the cached heading. */
-export function syncShipFromBody(
-  ship: Ship,
-  terrain: Terrain,
-  tracked: boolean,
-): void {
-  const body = ship.body;
-  let tr = body.translation();
-
-  // Hard terrain clearance: clamp up and bleed any downward velocity.
-  const tSafe = bilerpHeight(terrain, tr.x, tr.z);
-  if (tr.y < tSafe + SHIP_HARD_CLEAR) {
-    body.setTranslation({ x: tr.x, y: tSafe + SHIP_HARD_CLEAR, z: tr.z }, false);
-    const v = body.linvel();
-    if (v.y < 0) body.setLinvel({ x: v.x, y: 0, z: v.z }, false);
-    tr = body.translation();
+  // ----- bounds -----
+  // Hard terrain clearance: never let the keel dip into the grid. If it
+  // fires, level the path angle so the plane climbs away rather than
+  // scraping along the floor.
+  const floorY = bilerpHeight(terrain, p.x, p.z) + SHIP_HARD_CLEAR;
+  if (p.y < floorY) {
+    p.y = floorY;
+    if (ship.pitch < 0.08) ship.pitch = 0.08;
   }
-
-  // X bounds: clamp + zero outward velocity (soft wall).
-  if (tr.x > SHIP_X_BOUND) {
-    body.setTranslation({ x: SHIP_X_BOUND, y: tr.y, z: tr.z }, false);
-    const v = body.linvel();
-    if (v.x > 0) body.setLinvel({ x: 0, y: v.y, z: v.z }, false);
-    tr = body.translation();
-  } else if (tr.x < -SHIP_X_BOUND) {
-    body.setTranslation({ x: -SHIP_X_BOUND, y: tr.y, z: tr.z }, false);
-    const v = body.linvel();
-    if (v.x < 0) body.setLinvel({ x: 0, y: v.y, z: v.z }, false);
-    tr = body.translation();
-  }
-
-  // Z handling: tracked wraps front↔back (the chase camera reads zWrapDelta);
-  // untracked clamps so wandering ships don't pop across the screen.
-  if (tracked) {
-    const wrapSpan = SHIP_Z_MAX - SHIP_Z_MIN;
-    if (tr.z < SHIP_Z_MIN) {
-      body.setTranslation({ x: tr.x, y: tr.y, z: tr.z + wrapSpan }, true);
-      ship.zWrapDelta = wrapSpan;
-      tr = body.translation();
-    } else if (tr.z > SHIP_Z_MAX) {
-      body.setTranslation({ x: tr.x, y: tr.y, z: tr.z - wrapSpan }, true);
-      ship.zWrapDelta = -wrapSpan;
-      tr = body.translation();
-    }
+  if (p.y > SHIP_Y_MAX + 2) p.y = SHIP_Y_MAX + 2;
+  // Soft walls: guidance always steers toward an in-box target, so these
+  // only trim the overshoot of a wide correction (or a pilot's excursion).
+  // Arrivals and departures live outside the box by design.
+  if (ship.phase === 'active') {
+    p.x = clamp(p.x, -SHIP_X_BOUND, SHIP_X_BOUND);
+    p.z = clamp(p.z, SHIP_Z_MIN - 4, SHIP_Z_MAX + 4);
   } else {
-    if (tr.z > SHIP_Z_MAX) {
-      body.setTranslation({ x: tr.x, y: tr.y, z: SHIP_Z_MAX }, false);
-      const v = body.linvel();
-      if (v.z > 0) body.setLinvel({ x: v.x, y: v.y, z: 0 }, false);
-      tr = body.translation();
-    } else if (tr.z < SHIP_Z_MIN) {
-      body.setTranslation({ x: tr.x, y: tr.y, z: SHIP_Z_MIN }, false);
-      const v = body.linvel();
-      if (v.z < 0) body.setLinvel({ x: v.x, y: v.y, z: 0 }, false);
-      tr = body.translation();
-    }
+    p.x = clamp(p.x, -SHIP_X_BOUND - 18, SHIP_X_BOUND + 18);
   }
 
-  // Sync the Three.js visual transform. Rotation comes from the kinematic
-  // Euler set in updateShipControls; we don't read body.rotation() because
-  // that's just the same value we wrote there.
-  const rot = body.rotation();
-  ship.group.position.set(tr.x, tr.y, tr.z);
-  ship.group.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+  // ----- phase transitions + fade -----
+  if (ship.phase === 'joining') {
+    ship.fade = Math.min(1, ship.fade + dt / FLOCK_FADE_S);
+    if (p.z >= SHIP_Z_MIN) ship.phase = 'active';
+  } else if (leaving) {
+    // Hold full opacity until the plane has actually pulled away, then fade.
+    const clear = Math.abs(p.x) > SHIP_X_BOUND + 2 || p.z < SHIP_Z_MIN - 6;
+    if (clear) ship.fade = Math.max(0, ship.fade - dt / FLOCK_FADE_S);
+    if (ship.fade <= 0 || p.z < SHIP_Z_MIN - 40) {
+      ship.phase = 'dormant';
+      ship.fade = 0;
+      ship.group.visible = false;
+    }
+  }
+  ship.edgeMaterial.opacity = ship.fade;
+  ship.panelMaterial.opacity = 0.82 * ship.fade;
+
+  // ----- mesh attitude -----
+  // The nose rides a few degrees above the flight path (angle of attack),
+  // which is what makes a gliding paper plane read as *flying* rather than
+  // sliding along a rail — and it leads the acceleration: pushing forward
+  // tips it down beyond the path, easing off lifts it.
+  const nose = clamp(
+    ship.pitch + SHIP_VISUAL_AOA - ship.accel * SHIP_ACCEL_TO_NOSE,
+    -0.9, 0.9,
+  );
+  _euler.set(nose, ship.heading, ship.roll, 'YXZ');
+  ship.group.quaternion.setFromEuler(_euler);
 }

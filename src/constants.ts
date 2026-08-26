@@ -7,69 +7,147 @@ export const WIDTH = 50;
 export const DEPTH = 50;
 export const HEIGHT_SCALE = 7.0;
 export const NOISE_AMP = 0.18;
+// Row shaping — see the front-row write in main.ts. ROW_BLEND is how much of
+// a new row is the fresh FFT vs. the previous row (1 = raw spikes); SWELL is
+// the amplitude (u) of the slow rolling ground swell at full intensity.
+export const TERRAIN_ROW_BLEND = 0.55;
+export const TERRAIN_SWELL = 0.9;
+// Beat breath envelope (1/s attack and release) and amplitude (fraction of
+// height at full intensity). ~70 ms attack, ~350 ms release.
+export const TERRAIN_BREATH_ATTACK = 14;
+export const TERRAIN_BREATH_RELEASE = 2.8;
+export const TERRAIN_BREATH_AMP = 0.07;
 
 // ----- post-processing -----
 // Bloom RT divisor — half the canvas size keeps bloom roughly the same look
 // at quarter the fragment cost (5-mip pyramid × 2 blurs each).
 export const BLOOM_DIVISOR = 2;
 
-// ----- ship flight model (Rapier rigid-body dynamics) -----
+// ----- terrain motion -----
+// The spectrogram advances one grid row per frame toward −Z. Ships live in
+// the landscape's reference frame, so they are advected by exactly this much
+// each frame and must fly into the flow (+Z) to hold station.
+export const TERRAIN_ROW_SPACING = DEPTH / (ROWS - 1);
+
+// ----- ship flight model (kinematic coordinated flight, landscape frame) -----
 export const SHIP_X_BOUND = WIDTH * 0.40;
 export const SHIP_Z_MIN = -16;
 export const SHIP_Z_MAX = 18;
 export const SHIP_Z_CENTER = (SHIP_Z_MIN + SHIP_Z_MAX) * 0.5;
 export const SHIP_Y_MIN = 1.4;
 export const SHIP_Y_MAX = HEIGHT_SCALE * 1.5 + 1;
-export const SHIP_CLEARANCE = 1.5;       // soft clearance above forward-sampled terrain
+export const SHIP_CLEARANCE = 2.2;       // cruise height above the terrain envelope
 export const SHIP_HARD_CLEAR = 0.95;     // hard collision safety margin (clears keel)
-export const SHIP_LOOKAHEAD_DIST = 5.0;  // world units ahead to sample for altitude
-export const SHIP_MAX_BANK = 0.95;       // rad
-export const SHIP_MAX_PITCH = 0.55;      // rad
+export const SHIP_LOOKAHEAD_DIST = 14.0; // envelope sample span ahead of the nose (u)
+export const SHIP_MAX_BANK = 0.75;       // rad (≈43°)
+export const SHIP_MAX_PITCH = 0.42;      // rad, flight-path angle
 
-// Forces (N at 1 kg mass). Paper-plane drift: cruise ≈ sqrt(0.8/0.05) ≈ 4 u/s
-// baseline, sqrt(1.5/0.05) ≈ 5.5 u/s at full bass.
-export const SHIP_THRUST_BASE = 0.8;
-export const SHIP_THRUST_BOOST = 0.7;     // additional with full bass
-export const SHIP_THRUST_BEAT = 0.2;      // per-beat impulse
-export const SHIP_DRAG_K = 0.05;          // F_drag = K · |v| · v
+// Airspeed. Cruise ≈ ground flow (~23 u/s at 60 Hz) so a plane pointed into
+// the flow holds station; the autopilot adds a surge to close Z error and the
+// music adds its own — bass pushes the flock forward, quiet lets it fall back.
+export const SHIP_SURGE_Z_GAIN = 0.6;     // u/s of airspeed per u of Z error
+export const SHIP_SURGE_MAX = 7;          // station-keeping surge cap (u/s)
+export const SHIP_SURGE_BASS = 6;         // extra airspeed at full bass (u/s)
+export const SHIP_SURGE_BEAT = 2;         // per-beat nudge (u/s)
+export const SHIP_SPEED_LERP = 1.2;       // 1/s ease toward commanded airspeed
+export const SHIP_SPEED_MIN = 8;          // never slower than this (no stalls)
+export const SHIP_GRAVITY_PATH = 5;       // a = -G · sin(pitch): dives speed up, climbs slow
 
-// Lift = K · CL(α) · |v|², along body-up. K_lift is high to compensate for the
-// slow cruise speed (lift goes as v²; halving v ⇒ ¼ the lift, so K up to keep
-// lift in the right range to balance gravity).
-export const SHIP_LIFT_K = 0.15;
-export const SHIP_CL_SLOPE = 6.28;        // ∂CL/∂α at low AoA
-export const SHIP_CL_MAX = 1.4;           // saturation (real airfoils stall here)
-// Autopilot mapping. The pitch target also includes a velocity-aware AoA trim
-// (computed in ship.ts) so the plane carries the AoA needed to balance gravity
-// at its current speed.
-export const SHIP_HEADING_TO_BANK = 0.5;
-export const SHIP_ALT_TO_PITCH = 0.30;
-export const SHIP_PITCH_VY_DAMP = 0.04;   // gentle phugoid damper (used to be a feedback amplifier when too high)
+// Coordinated turn: turnRate = TURN_G · tan(roll) / speed ≈ 0.5 rad/s at
+// cruise and max bank.
+export const SHIP_TURN_G = 12;
+// Lateral guidance: desired sideways speed = LAT_GAIN × X error (capped),
+// turned into a heading deviation from straight-into-the-flow.
+export const SHIP_LAT_GAIN = 0.6;
+export const SHIP_LAT_MAX = 10;           // u/s
+export const SHIP_HEADING_TO_BANK = 1.6;  // rad of bank per rad of heading error
+export const SHIP_YAW_DAMP = 0.5;         // bank command damping on current turn rate
+export const SHIP_ROLL_RATE = 1.4;        // rad/s cap on roll — rolls in visibly, never snaps
+export const SHIP_ROLL_LERP = 2.2;        // 1/s first-order ease toward the bank command
+export const SHIP_PITCH_LERP = 1.6;       // 1/s first-order ease toward the pitch command
 
-// Kinematic attitude rates. All three are first-order-lerp coefficients (1/s).
-// SHIP_YAW_RATE now governs how fast the mesh's heading slews toward the
-// velocity vector (so the nose tracks motion direction); lower = floatier
-// turn-in lag, higher = nose snaps to velocity.
-export const SHIP_YAW_RATE = 3.0;
-export const SHIP_PITCH_LERP = 1.5;
-export const SHIP_ROLL_LERP = 1.5;
+// Altitude hold. Commands a vertical speed (ALT_GAIN × error, capped at VY_MAX)
+// and derives the path angle from it, so the loop closes on velocity and
+// settles without a phugoid bounce.
+export const SHIP_ALT_GAIN = 0.9;
+export const SHIP_VY_MAX = 5;
+export const SHIP_ALT_WANDER = 1.2;       // noise-driven cruise-altitude offset (u)
+// Envelope follow: climb onto a rising envelope at this rate (1/s), sink
+// away from a falling one at this speed (u/s) — fast up, lazy down.
+export const SHIP_ENVELOPE_RISE = 3.0;
+export const SHIP_ENVELOPE_SINK = 0.5;
+export const SHIP_VISUAL_AOA = 0.07;      // nose-above-path angle for the mesh (rad)
+// Acceleration → pitch. A paper plane gains speed by dropping its nose and
+// sheds it by flaring, so the commanded path angle dips by ACCEL_TO_PITCH
+// per u/s² of acceleration and the visible nose leads further by
+// ACCEL_TO_NOSE. Smoothed over ACCEL_SMOOTH_S so beats read as a nod, not a
+// twitch. At a full-bass onset (~7 u/s²) the nose drops ≈16°.
+export const SHIP_ACCEL_TO_PITCH = 0.02;  // rad per u/s², flight path
+export const SHIP_ACCEL_TO_NOSE = 0.02;   // rad per u/s², extra on the mesh
+export const SHIP_ACCEL_SMOOTH_S = 0.25;
 
-// World gravity — light so the paper plane glides at low cruise speeds.
-// Cruise AoA solves K_lift·CL_slope·α·v² = g → α ≈ 7° at v=5.5, which fits
-// comfortably below MAX_PITCH and stall.
-export const SHIP_GRAVITY = 3.5;
+// ----- flock size -----
+// Quiet music flies a single plane; the flock grows toward SHIP_MAX as the
+// music intensifies and disperses again as it calms. Energy is normalised
+// against a slowly decaying running maximum, so any source level works.
+export const SHIP_MAX = 12;
+export const FLOCK_ENERGY_RISE_S = 2.0;    // EMA time constant while energy is rising
+export const FLOCK_ENERGY_FALL_S = 5.0;    // …and while falling — the flock lingers
+export const FLOCK_MAX_MEMORY_S = 90;      // running-max memory (relative decay time constant)
+export const FLOCK_JOIN_HOLD_S = 0.8;      // energy must ask for more for this long
+export const FLOCK_LEAVE_HOLD_S = 2.5;     // …or for fewer for this long
+export const FLOCK_JOIN_INTERVAL_S = 1.4;  // min spacing between arrivals
+export const FLOCK_LEAVE_INTERVAL_S = 1.6; // min spacing between departures
+export const FLOCK_JOIN_DIST = 26;         // arrivals spawn this far behind the box (u)
+export const FLOCK_JOIN_SURGE = 14;        // extra airspeed while catching up (u/s)
+export const FLOCK_LEAVE_DROP = 9;         // airspeed shed while peeling away (u/s)
+export const FLOCK_FADE_S = 1.6;           // opacity fade in/out (s)
 
-// Slot offsets in the formation, leader-relative. ships[0] is the leader.
-export const FORMATION_SLOTS: { dx: number; dz: number }[] = [
-  { dx: 0,    dz: 0 },    // leader
-  { dx: -3.5, dz: 2.5 },  // wing-left, slightly behind
-  { dx: 3.5,  dz: 2.5 },  // wing-right, slightly behind
-];
+// Formation slots, leader-relative, for up to SHIP_MAX planes: a widening V
+// trailing the leader. Noses point +Z (into the flow), so "behind" is −Z.
+export const FORMATION_SLOTS: { dx: number; dz: number }[] = Array.from(
+  { length: SHIP_MAX },
+  (_, k) => {
+    if (k === 0) return { dx: 0, dz: 0 };
+    const rank = Math.ceil(k / 2);
+    const side = k % 2 === 1 ? -1 : 1;
+    return { dx: side * 3.2 * rank, dz: -2.6 * rank };
+  },
+);
 
 // ----- camera spring (preset orbit) -----
-export const CAM_STIFFNESS = 50;
-export const CAM_DAMPING = 9;
-export const CAM_BASS_IMPULSE = 0.6;
+// Critically damped and slow (ω ≈ 1.5 rad/s, ζ ≈ 1): a preset change glides
+// over ~3 s with no overshoot. The old underdamped spring (ζ ≈ 0.6, ω ≈ 7)
+// is what made every cut and bass kick read as a lurch.
+export const CAM_STIFFNESS = 2.2;
+export const CAM_DAMPING = 3.0;
+export const CAM_BASS_IMPULSE = 0.03;     // whisper of sway on a kick
+// Manual drag offsets relax back to the preset over this time constant (s).
+export const CAM_DRAG_RELAX_S = 25;
+// Slow ambient orbit drift so static shots keep breathing.
+export const CAM_DRIFT_YAW = 0.10;        // rad amplitude
+export const CAM_DRIFT_RATE = 0.06;       // rad/s
+// Dolly ease toward a preset's radius/height (1/s).
+export const CAM_DOLLY_LERP = 0.7;
+
+// ----- chase camera -----
+export const CHASE_BACK = 6.0;            // u behind the ship
+export const CHASE_UP = 1.1;              // u above the ship — low, so the ship reads against sky
+export const CHASE_LOOK_UP = 1.0;         // look-target lift above the ship (u)
+export const CHASE_TERRAIN_CLEAR = 1.2;   // camera never dips closer than this to the grid
+export const CHASE_LOOK_AHEAD = 4.0;      // look-target lead along the nose (u)
+export const CHASE_POS_LERP = 3.0;        // 1/s ease of camera position
+export const CHASE_LOOK_LERP = 4.5;       // 1/s ease of look target
+export const CHASE_ROLL_FOLLOW = 0.35;    // fraction of ship bank the camera adopts
+
+// ----- camera transitions -----
+// Every mode change is a glide, never a cut: the camera pose eases from where
+// it is to the new mode's live pose over this many seconds, arcing upward so
+// it never ploughs through the grid on the way.
+export const CAM_BLEND_S = 3.2;
+export const CAM_BLEND_DROP_S = 1.8;      // drops earn a quicker move
+export const CAM_BLEND_MANUAL_S = 2.0;    // C key
+export const CAM_BLEND_ARC = 3.0;         // u of upward arc at mid-transition
 
 // ----- audio gain stages feeding the BPM analyser -----
 export const BPM_GAIN_FILE = 1.0;
@@ -79,6 +157,12 @@ export const BPM_GAIN_MIC = 8.0;
 export const DROP_RATIO_THRESHOLD = 1.4;   // short/mid ratio above this triggers a drop
 export const DROP_REFRACTORY_MS = 1500;
 export const QUIET_THRESHOLD = 0.05;
+
+// ----- cinematic director pacing -----
+export const SHOT_MIN_EVENT_MS = 14000;   // a drop/build/quiet may cut only after this
+export const SHOT_MIN_CADENCE_MS = 18000; // beat-cadence cuts wait at least this long
+export const BUILD_CUT_REFRACTORY_MS = 20000;
+export const SHOT_FALLBACK_MS = 28000;    // no BPM lock → cut this often
 
 // ----- pilot override -----
 // Arrow-key presses in chase/cockpit extend the current shot by this much,

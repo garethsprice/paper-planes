@@ -16,7 +16,7 @@ import { HybridRenderPass } from './stereo.ts';
 const ChromaticAberrationShader = {
   uniforms: {
     tDiffuse: { value: null },
-    uAmount: { value: 0.002 },
+    uAmount: { value: 0.0006 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -59,7 +59,7 @@ export function createRenderPipeline(
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 0.95;
+  renderer.toneMappingExposure = 0.88;
   // WebXR is enabled lazily by the VR button (see xr/session.ts) — having
   // it on at startup can interfere with the SBS scissor render.
   renderer.xr.setReferenceSpaceType('local-floor');
@@ -72,9 +72,9 @@ export function createRenderPipeline(
   composer.addPass(new HybridRenderPass(scene, camera, stereo));
   const bloom = new UnrealBloomPass(
     bloomRes,
-    0.4,  // strength — animate() rewrites each frame; this is the at-rest value
-    0.55, // radius
-    0.08, // threshold — only the brightest peaks bloom
+    0.2,  // strength — animate() rewrites each frame; this is the at-rest value
+    0.32, // radius — tight; the wide 0.55 on a half-res buffer blotched
+    0.42, // threshold — only genuinely bright crests and the ships bloom
   );
   composer.addPass(bloom);
   const chromaticPass = new ShaderPass(ChromaticAberrationShader);
@@ -98,14 +98,17 @@ export type PostFxInput = {
 export function updatePostFx(pipeline: RenderPipeline, input: PostFxInput): void {
   const { intensity: I, bassEnergy, dropBoost, stereoEnabled } = input;
   const bloomMul = stereoEnabled ? 0.4 : 1.0;
+  // Restrained: at-rest 0.18, peaks around 0.5 on a drop. Glow should read
+  // as a halo on the brightest crests, never a wash over the whole grid.
   pipeline.bloom.strength =
-    ((0.28 + 0.12 * I) + bassEnergy * 0.22 * I + dropBoost * 0.35) * bloomMul;
-  pipeline.bloom.radius = stereoEnabled ? 0.3 : 0.55;
+    ((0.16 + 0.06 * I) + bassEnergy * 0.10 * I + dropBoost * 0.18) * bloomMul;
+  pipeline.bloom.radius = stereoEnabled ? 0.25 : 0.32;
   pipeline.chromaticPass.enabled = !stereoEnabled;
   if (!stereoEnabled) {
+    // A whisper of fringing — beyond ~0.004 the stars split into RGB triplets.
     pipeline.chromaticPass.uniforms.uAmount.value = Math.min(
-      0.012,
-      0.0008 + bassEnergy * 0.006 * I + dropBoost * 0.005,
+      0.0035,
+      0.0003 + bassEnergy * 0.0015 * I + dropBoost * 0.0015,
     );
   }
 }

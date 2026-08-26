@@ -61,10 +61,16 @@ export function updateDebugPanel(
   dynamics: Dynamics,
   formation: Formation,
   dropBoost: number,
+  flock: { present: number; desired: number; energy: number },
 ): void {
   if ((dbgFrameCounter++ % 6) !== 0) return;
   dbgEl.innerHTML =
-    `<span class="num">I ${dynamics.intensity.toFixed(2)}</span>` +
+    `<span class="num">✈ ${flock.present}</span>` +
+    (flock.desired !== flock.present
+      ? `<span style="opacity:0.5">→${flock.desired}</span>`
+      : '') +
+    `<span class="num"> · E ${flock.energy.toFixed(2)}</span>` +
+    `<span class="num"> · I ${dynamics.intensity.toFixed(2)}</span>` +
     `<span class="num"> · B ${dynamics.build.toFixed(2)}</span>` +
     (dynamics.quiet ? '<span class="tag on"> QUIET</span>' : '') +
     (dropBoost > 0.05

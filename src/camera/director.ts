@@ -1,9 +1,16 @@
-// Music-driven camera director. Cuts on drops / build onsets / quiet
-// onsets; otherwise paces beat-cadence cuts whose interval scales with
-// musical intensity. Pilot override (arrow-key in chase/cockpit) extends
-// the current shot so user control isn't snatched away mid-flight.
+// Music-driven camera director. Changes shot on drops / build onsets /
+// quiet onsets; otherwise paces beat-cadence changes whose interval scales
+// with musical intensity. Every shot change is a glide (see camera/update)
+// and every path is gated on a long minimum shot age so the eye always gets
+// time to settle — a shot that changes every few seconds reads as nervous
+// no matter how musical the timing. Pilot override
+// (arrow-key in chase/cockpit) extends the current shot so user control
+// isn't snatched away mid-flight.
 
-import { PILOT_EXTEND_MS } from '../constants.ts';
+import {
+  PILOT_EXTEND_MS, SHOT_MIN_EVENT_MS, SHOT_MIN_CADENCE_MS,
+  BUILD_CUT_REFRACTORY_MS, SHOT_FALLBACK_MS, CAM_BLEND_DROP_S,
+} from '../constants.ts';
 import type { Dynamics } from '../audio/dynamics.ts';
 import type { CameraSelection } from './modes.ts';
 import { applyCut, pickCinematicMode } from './modes.ts';
@@ -71,30 +78,34 @@ export function runDirector(
   const buildOnset = ctx.dynamics.build > 0.45 && director.prevBuild <= 0.45;
   const quietOnset = ctx.dynamics.quiet && !director.prevQuiet;
   const shotAgeMs = now - sel.modeChangedAt;
-  // Languid pacing — events have to wait for a fresh shot to breathe.
-  const MIN_SHOT_EVENT_MS = 3500;
-  const MIN_SHOT_CADENCE_MS = 6000;
 
-  if (ctx.dropFiredThisFrame && shotAgeMs > MIN_SHOT_EVENT_MS) {
-    applyCut(sel, pickCinematicMode(sel, 'dramatic'), ctx.beatCount);
-  } else if (buildOnset && now - director.lastBuildCutAt > 6000 && shotAgeMs > MIN_SHOT_EVENT_MS) {
+  if (ctx.dropFiredThisFrame && shotAgeMs > SHOT_MIN_EVENT_MS) {
+    // A drop earns the one quick move we allow — still a glide, not a cut.
+    applyCut(sel, pickCinematicMode(sel, 'dramatic'), ctx.beatCount, CAM_BLEND_DROP_S);
+  } else if (
+    buildOnset &&
+    now - director.lastBuildCutAt > BUILD_CUT_REFRACTORY_MS &&
+    shotAgeMs > SHOT_MIN_EVENT_MS
+  ) {
     applyCut(sel, pickCinematicMode(sel, 'rush'), ctx.beatCount);
     director.lastBuildCutAt = now;
-  } else if (quietOnset && shotAgeMs > MIN_SHOT_EVENT_MS) {
+  } else if (quietOnset && shotAgeMs > SHOT_MIN_EVENT_MS) {
     applyCut(sel, pickCinematicMode(sel, 'calm'), ctx.beatCount);
-    director.nextCutMinBeats = ctx.beatCount + 48;
+    director.nextCutMinBeats = ctx.beatCount + 64;
   } else {
     // Beat cadence — long holds. Intensity narrows the interval but never
-    // below ~12 beats so even peak sections feel composed.
+    // below 32 beats (16 s at 120 BPM) so even peak sections feel composed.
     const I = ctx.dynamics.intensity;
-    const beatsPerCut = ctx.dynamics.quiet ? 48 : I > 0.85 ? 12 : I > 0.5 ? 24 : 32;
+    const beatsPerCut = ctx.dynamics.quiet ? 96 : I > 0.85 ? 32 : I > 0.5 ? 48 : 64;
     const beatReady =
       ctx.beatCount - sel.beatsAtChange >= beatsPerCut &&
       ctx.beatCount >= director.nextCutMinBeats &&
-      shotAgeMs > MIN_SHOT_CADENCE_MS;
+      shotAgeMs > SHOT_MIN_CADENCE_MS;
     // Time fallback — long enough to feel patient when the analyser hasn't
-    // locked yet (BPM=0 → 20 s floor).
-    const fallbackMs = ctx.bpm > 0 ? (60 / ctx.bpm) * 1000 * beatsPerCut * 2.5 : 20000;
+    // locked yet.
+    const fallbackMs = ctx.bpm > 0
+      ? (60 / ctx.bpm) * 1000 * beatsPerCut * 1.5
+      : SHOT_FALLBACK_MS;
     const timeReady = shotAgeMs >= fallbackMs;
     if (beatReady || timeReady) {
       const role = I > 0.3 ? 'active' : 'calm';

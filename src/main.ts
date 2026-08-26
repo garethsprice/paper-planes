@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import {
-  COLS, ROWS, HEIGHT_SCALE, NOISE_AMP, BLOOM_DIVISOR,
+  COLS, ROWS, HEIGHT_SCALE, NOISE_AMP, BLOOM_DIVISOR, TERRAIN_ROW_SPACING, CAM_BLEND_MANUAL_S,
+  TERRAIN_ROW_BLEND, TERRAIN_SWELL, TERRAIN_BREATH_ATTACK, TERRAIN_BREATH_RELEASE, TERRAIN_BREATH_AMP,
 } from './constants.ts';
 import { createStereoState } from './render/stereo.ts';
 import { createRenderPipeline, updatePostFx, renderFrame } from './render/pipeline.ts';
@@ -12,11 +13,11 @@ import {
 import { dom } from './ui/dom.ts';
 import { createFrame } from './frame.ts';
 import { createSceneCore } from './scene/core.ts';
-import { createTerrain, sampleLogBin } from './scene/terrain.ts';
+import { createTerrain, sampleLogBin, bilerpHeight } from './scene/terrain.ts';
 import { createStars } from './scene/stars.ts';
 import { createNebula } from './scene/nebula.ts';
-import { createShips, activateFormation, updateShipControls, syncShipFromBody } from './scene/ship.ts';
-import { createPhysics } from './scene/physics.ts';
+import { createShips, activateFormation, updateShip } from './scene/ship.ts';
+import { createFlock, updateFlock } from './scene/flock.ts';
 import {
   ensureAudio, getAudio, attachStream, loadAudioFile,
   type AudioState,
@@ -26,10 +27,11 @@ import { createDynamics, updateDynamics, decayDynamics } from './audio/dynamics.
 import { extractAudio } from './audio/analyser.ts';
 import {
   createCameraSelection, applyCut, trackedShipIdx as getTrackedShipIdx,
+  nextAvailableMode, pickCinematicMode,
 } from './camera/modes.ts';
 import { createOrbit, attachOrbitInput, updateOrbitPhysics } from './camera/orbit.ts';
 import { createDirector, runDirector, bumpPilotControl } from './camera/director.ts';
-import { updateCamera } from './camera/update.ts';
+import { updateCamera, createCameraRig } from './camera/update.ts';
 
 const { canvas, fileInput, playBtn, micBtn, tabBtn, stereoBtn, uiEl, statusEl, bpmNumEl, bpmDotEl, dbgEl } = dom;
 
@@ -53,17 +55,15 @@ const { posAttr, heights, noise3, binMap, mirrorMaterial } = terrain;
 const stars = createStars(scene);
 const nebula = createNebula(scene);
 
-// ----- Rapier physics world (must finish WASM init before bodies can spawn) -----
-const physics = await createPhysics();
-
 // ----- ships + formation flight (factories live in src/scene/ship.ts) -----
-const shipsHandle = createShips(scene, physics);
+const shipsHandle = createShips(scene);
 const ships = shipsHandle.list;
 const formation = shipsHandle.formation;
+const flock = createFlock();
 
 
 // ----- audio plumbing -----
-// Per-frame mutable context — extractAudio / updateDynamics / updateShipControls
+// Per-frame mutable context — extractAudio / updateDynamics / updateShip
 // each read what they need and write whatever they own.
 const frame = createFrame();
 const bpmHandle = createBpmHandle();
@@ -172,7 +172,10 @@ canvas.addEventListener('click', () => {
 });
 
 // ----- camera mode catalogue + music-driven director -----
-const cameraSel = createCameraSelection(ships.length);
+// Tracked camera modes exist for the first three ships only; the director
+// and the C key skip any whose ship isn't currently in the flock.
+const cameraSel = createCameraSelection(3);
+const cameraRig = createCameraRig();
 const director = createDirector();
 
 // ----- keyboard shortcuts + UI auto-hide tracking -----
@@ -192,7 +195,7 @@ installKeyHandlers({
     statusEl.textContent = `nebula ${nebula.visible ? 'on' : 'off'}`;
   },
   cycleCamera: () => {
-    applyCut(cameraSel, (cameraSel.currentIdx + 1) % cameraSel.modes.length, bpmHandle.beatCount);
+    applyCut(cameraSel, nextAvailableMode(cameraSel), bpmHandle.beatCount, CAM_BLEND_MANUAL_S);
     statusEl.textContent = `cam: ${cameraSel.modes[cameraSel.currentIdx].label}`;
   },
   toggleCinematic: () => {
@@ -212,7 +215,7 @@ const interaction = installInteractionTracking();
 
 // ----- drop response: per-event side effects, fired once when dropCount advances -----
 let lastSeenDropCount = 0;
-let dropFovOverlayUntil = 0; // ms timestamp; FOV widens until this time
+let dropFovPulse = 0;        // 0..1, set on a drop and decays; widens the FOV
 let dropFiredThisFrame = false; // consumed by the cinematic director below
 
 function onDrop() {
@@ -220,8 +223,8 @@ function onDrop() {
   // good enough that the formation is held long enough to read).
   const ms = bpmHandle.bpm > 0 ? (60 / bpmHandle.bpm) * 1000 * 8 : 6000;
   activateFormation(formation, ms);
-  // FOV widen pulse — the awe shot
-  dropFovOverlayUntil = performance.now() + 600;
+  // FOV widen pulse — the awe shot (eased in and out, see the loop)
+  dropFovPulse = 1;
   // The cinematic director (later in the same frame) reads this flag to
   // hard-cut to a dramatic angle.
   dropFiredThisFrame = true;
@@ -229,7 +232,10 @@ function onDrop() {
 
 // ----- animation loop -----
 const clock = new THREE.Clock();
+let groundFlow = TERRAIN_ROW_SPACING * 60; // u/s, refined per frame from dt
 const ROW_STRIDE_FRONT = (ROWS - 1) * COLS; // newest row offset in heights[]
+const rowScratch = new Float32Array(COLS);   // raw FFT row before shaping
+let breath = 0;                               // smoothed beat envelope, 0..1
 
 function animate() {
   // setAnimationLoop drives this externally — works for both rAF (2D) and
@@ -263,14 +269,26 @@ function animate() {
     decayDynamics(dynamics);
   }
 
-  // Front-row write — log-scaled FFT amplitude + low-amp simplex texture.
+  // Front-row write — log-scaled FFT amplitude, shaped into ridges rather
+  // than spikes: a 3-tap blur across columns rounds the peaks, a blend with
+  // the previous row (now one step back after the shift) lets a transient
+  // rise over a few frames instead of appearing fully formed, and a slow
+  // broad swell rolls underneath so the floor undulates with the music.
   const baseIdx = ROW_STRIDE_FRONT;
+  const prevRow = baseIdx - COLS;
   if (fftBins) {
     for (let ix = 0; ix < COLS; ix++) {
-      const amp = sampleLogBin(fftBins, binMap[ix]) / 255;
-      const shaped = Math.pow(amp, 0.85);
+      rowScratch[ix] = Math.pow(sampleLogBin(fftBins, binMap[ix]) / 255, 0.85);
+    }
+    for (let ix = 0; ix < COLS; ix++) {
+      const l = rowScratch[Math.max(0, ix - 1)];
+      const r = rowScratch[Math.min(COLS - 1, ix + 1)];
+      const shaped = (l + 2 * rowScratch[ix] + r) * 0.25;
       const n = noise3(ix * 0.08, t * 0.35, 0) * NOISE_AMP;
-      heights[baseIdx + ix] = shaped * HEIGHT_SCALE + n;
+      const swell = (noise3(ix * 0.018, t * 0.12, 7) * 0.5 + 0.5) * TERRAIN_SWELL * dynamics.intensity;
+      const target = shaped * HEIGHT_SCALE + n + swell;
+      heights[baseIdx + ix] =
+        heights[prevRow + ix] + (target - heights[prevRow + ix]) * TERRAIN_ROW_BLEND;
     }
   } else {
     for (let ix = 0; ix < COLS; ix++) {
@@ -299,11 +317,13 @@ function animate() {
   const dropBoost = sinceDrop < 1.5 ? Math.exp(-sinceDrop * 2.0) : 0;
   const I = dynamics.intensity;
 
-  // FOV widen pulse during the brief drop overlay
-  const fovOverlay = Math.max(0, dropFovOverlayUntil - performance.now()) / 600;
-  const targetFov = 55 + fovOverlay * 8;
-  if (Math.abs(camera.fov - targetFov) > 0.01) {
-    camera.fov = targetFov;
+  // FOV widen pulse on a drop: a few degrees, eased both ways so the lens
+  // breathes rather than snaps.
+  dropFovPulse *= Math.exp(-dt / 1.4);
+  const targetFov = 55 + dropFovPulse * 3.5;
+  const newFov = camera.fov + (targetFov - camera.fov) * (1 - Math.exp(-5 * dt));
+  if (Math.abs(camera.fov - newFov) > 0.001) {
+    camera.fov = newFov;
     camera.updateProjectionMatrix();
   }
 
@@ -315,20 +335,32 @@ function animate() {
   formation.blendIn += ((formation.active ? 1 : 0) - formation.blendIn) * formationLerp;
   formation.blendOut = formation.blendIn; // single state suffices — blend toward target
 
-  // The currently-tracked ship (chase/cockpit) wraps Z front↔back; others clamp.
+  // Ground flow: the landscape advances one grid row per frame, so its
+  // speed depends on the frame rate. Smooth it so a hitch doesn't make the
+  // flock lurch; the ships use it as their cruise airspeed.
+  groundFlow += (TERRAIN_ROW_SPACING / Math.max(dt, 1 / 240) - groundFlow) * (1 - Math.exp(-dt / 0.5));
+  // Flock size follows musical energy: arrivals surge in from behind,
+  // departures peel away. Ships 0..present-1 are the ones in play.
+  updateFlock(flock, ships, {
+    dt, time: t, level, bassEnergy,
+    quiet: dynamics.quiet, intensity: I, hasAudio: fftBins !== null,
+  });
+  cameraSel.presentShips = flock.present;
+  // If the ship we were chasing has left, glide back to a calm shot.
+  const chasedIdx = getTrackedShipIdx(cameraSel);
+  if (chasedIdx >= 0 && ships[chasedIdx].phase === 'dormant') {
+    applyCut(cameraSel, pickCinematicMode(cameraSel, 'calm'), bpmHandle.beatCount);
+  }
+  // The piloted ship (chase/cockpit) accepts arrow-key steering.
   const trackedShipIdx = getTrackedShipIdx(cameraSel);
   const shipInput = {
-    dt, time: t, level, centroid,
+    dt, time: t, groundFlow, level, centroid,
     bassEnergy, beatPulse: bpmHandle.beatPulse, arrowKeys,
   };
-  // 1. Queue forces and torques on every body.
+  // Index order matters: wingmen read the leader's target from this frame.
   ships.forEach((ship, i) =>
-    updateShipControls(ship, i, ships, formation, terrain, shipInput, i === trackedShipIdx),
+    updateShip(ship, i, ships, formation, terrain, shipInput, i === trackedShipIdx),
   );
-  // 2. One world step integrates all bodies under the queued forces.
-  physics.world.step();
-  // 3. Post-step: sync Three.js groups, enforce terrain floor + bounds, refresh heading cache.
-  ships.forEach((ship, i) => syncShipFromBody(ship, terrain, i === trackedShipIdx));
 
   // Music-driven cinematic director — synchronises cuts to drops, builds,
   // quiet sections, and beat cadence. 'V' toggles, 'C' jumps regardless.
@@ -344,23 +376,29 @@ function animate() {
 
   // Orbit physics (consumed by preset modes); then dispatch on the active mode.
   updateOrbitPhysics(orbit, bassEnergy, dt);
-  updateCamera(camera, cameraSel, orbit, ships, {
+  updateCamera(camera, cameraSel, orbit, cameraRig, ships, {
     bassEnergy,
     intensity: I,
     buildLevel: dynamics.build,
     dt,
+    time: t,
+    terrainHeightAt: (x, z) => bilerpHeight(terrain, x, z),
   });
 
   // (sinceDrop and dropBoost computed earlier in this frame, see top of
   // animation loop block above the camera section.)
 
-  // beat pulse breathes the landscape; scaled by intensity so it's flat on
-  // quiet sections and full-bodied during loud ones.
-  uniforms.uHeightMul.value = 1.0 + bpmHandle.beatPulse * 0.10 * I;
+  // Beat breath: the landscape swells on the kick and settles back, on an
+  // attack/release envelope rather than the raw beat pulse (which steps to
+  // 1 in a single frame and read as a jolt). Scaled by intensity so it's
+  // flat on quiet sections and full-bodied during loud ones.
+  const breathRate = bpmHandle.beatPulse > breath ? TERRAIN_BREATH_ATTACK : TERRAIN_BREATH_RELEASE;
+  breath += (bpmHandle.beatPulse - breath) * (1 - Math.exp(-breathRate * dt));
+  uniforms.uHeightMul.value = 1.0 + breath * TERRAIN_BREATH_AMP * I;
   // aurora: phase sweeps slowly (faster on louder sections), intensity
   // fades to zero during quiet.
   uniforms.uAuroraPhase.value += (0.4 + I * 0.4) * dt;
-  uniforms.uAuroraIntensity.value = I * 0.45 + dropBoost * 0.3;
+  uniforms.uAuroraIntensity.value = I * 0.28 + dropBoost * 0.18;
   // mirror world fades down when the scene is quiet
   mirrorMaterial.uniforms.uOpacity.value = 0.10 * I;
   // very subtle star parallax (independent of intensity — the cosmos doesn't pause)
@@ -384,7 +422,7 @@ function animate() {
   // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
   bpmHandle.beatPulse *= Math.exp(-9 * dt); // visible for ~150ms after each peak
   updateBpmReadout({ uiEl, bpmNumEl, bpmDotEl, dbgEl }, bpmHandle);
-  updateDebugPanel(dbgEl, dynamics, formation, dropBoost);
+  updateDebugPanel(dbgEl, dynamics, formation, dropBoost, flock);
 
   renderFrame(pipeline, scene, camera, dt);
 }

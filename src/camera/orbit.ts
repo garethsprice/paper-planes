@@ -1,9 +1,14 @@
-// Spring-physics orbit state used by the cinematic preset cameras. Mouse
-// drag pushes targetYaw/targetPitch; each frame we integrate yaw/pitch
-// toward those targets with critically-underdamped springs (slight
-// overshoot when targets change). Bass attacks add an impulse to yawVel.
+// Spring-physics orbit state used by the cinematic preset cameras. Each
+// frame yaw/pitch are integrated toward targetYaw/targetPitch with a slow,
+// critically damped spring, so a preset change becomes a ~3 s glide rather
+// than a cut. Mouse drag adds an offset (dragYaw/dragPitch) on top of the
+// preset target; the offset relaxes back over tens of seconds so the shot
+// quietly returns to its composed framing. Bass attacks add a whisper of
+// sway to yawVel.
 
-import { CAM_STIFFNESS, CAM_DAMPING, CAM_BASS_IMPULSE } from '../constants.ts';
+import {
+  CAM_STIFFNESS, CAM_DAMPING, CAM_BASS_IMPULSE, CAM_DRAG_RELAX_S,
+} from '../constants.ts';
 
 export type Orbit = {
   yaw: number;
@@ -12,6 +17,9 @@ export type Orbit = {
   pitchVel: number;
   targetYaw: number;
   targetPitch: number;
+  /** User drag offsets, added to the preset target and slowly relaxed. */
+  dragYaw: number;
+  dragPitch: number;
   prevBass: number;
   camRadius: number;
   camHeight: number;
@@ -28,6 +36,8 @@ export function createOrbit(): Orbit {
     pitchVel: 0,
     targetYaw: 0,
     targetPitch: 0,
+    dragYaw: 0,
+    dragPitch: 0,
     prevBass: 0,
     camRadius: 28,
     camHeight: 9,
@@ -55,21 +65,27 @@ export function attachOrbitInput(orbit: Orbit, canvas: HTMLCanvasElement): void 
     const dy = e.clientY - orbit.lastY;
     orbit.lastX = e.clientX;
     orbit.lastY = e.clientY;
-    orbit.targetYaw += dx * 0.0035;
-    orbit.targetPitch += dy * 0.0025;
-    orbit.targetPitch = Math.max(-0.45, Math.min(0.55, orbit.targetPitch));
+    orbit.dragYaw += dx * 0.0035;
+    orbit.dragPitch = Math.max(-0.45, Math.min(0.55, orbit.dragPitch + dy * 0.0025));
   });
 }
 
 /**
  * Integrate the spring physics for one frame. Bass attacks (sudden positive
- * delta in bassEnergy above the threshold) inject a yaw impulse so the
- * camera nudges sideways on each kick.
+ * delta in bassEnergy above the threshold) inject a small yaw impulse so the
+ * camera sways faintly on each kick.
  */
 export function updateOrbitPhysics(orbit: Orbit, bassEnergy: number, dt: number): void {
   const bassDelta = bassEnergy - orbit.prevBass;
   orbit.prevBass = bassEnergy;
   if (bassDelta > 0.05) orbit.yawVel += bassDelta * CAM_BASS_IMPULSE;
+
+  // Drag offsets relax while the pointer is up.
+  if (!orbit.dragging) {
+    const relax = 1 - Math.exp(-dt / CAM_DRAG_RELAX_S);
+    orbit.dragYaw -= orbit.dragYaw * relax;
+    orbit.dragPitch -= orbit.dragPitch * relax;
+  }
 
   const yawErr = orbit.targetYaw - orbit.yaw;
   const pitchErr = orbit.targetPitch - orbit.pitch;

@@ -12,12 +12,13 @@ Since I was a kid I've watched something like this in my head whenever I've list
 
 - **Live spectrogram** — `AnalyserNode` (`fftSize: 1024`, `smoothing: 0.8`) drives a 129×129 wireframe grid scrolling in -Z.
 - **Audio sources** — file drop / pick, microphone, or a tab via `getDisplayMedia` (Chrome/Edge).
-- **Three autopilot ships** — each a 3D triangular wedge with a sharp nose and tall back. They use a real flight model (heading + scalar speed integrated with dt, P-controller turn rate, intrinsic yaw→pitch→roll), wander to targets driven by simplex noise + spectral centroid, and bank into turns.
+- **A flock that breathes with the music** — one paper plane in quiet passages, up to `SHIP_MAX` (12) at full intensity. Musical energy is the mean spectrum level normalised against a ~90 s running peak, so it self-calibrates to any source; arrivals surge in from the dark behind the flock, departures throttle back, bank outward and fade as the landscape carries them away. The leader never leaves.
+- **Autopilot ships** — paper wedges with frosted panels and a glowing edge. They fly in the *landscape's* reference frame: the spectrogram streams past at one grid row per frame, the planes are carried with it, and they hold station by flying into the flow at airspeed ≈ ground speed. Every motion is a physical consequence — bank gives a coordinated turn (ω = g·tan φ / v) and lateral drift, pitch gives climb/dive (dives speed up, climbs bleed), throttle surges the flock forward on bass and lets it fall back in quiet, and acceleration pitches the nose: a plane drops its nose to gain speed and flares as it sheds it. Altitude rides a slow terrain *envelope* — rising quickly onto loud passages, sinking gently after. Wander targets come from simplex noise + spectral centroid.
 - **BPM detection** — [`realtime-bpm-analyzer`](https://github.com/dlepaux/realtime-bpm-analyzer) feeds a live readout and a per-beat dot indicator. A 200 Hz biquad lowpass focuses peak detection on the kick band; mic input gets a 8× gain stage so quiet rooms still lock.
 - **Beat reactivity** — ships get a thrust kick on every detected peak; the whole landscape breathes vertically; the camera bass-pushes in; the cool→hot gradient drifts in hue.
-- **11 cameras** — five cinematic presets (eye-level, 3/4 high-side, low-left, overhead reverse, straight overhead), three chase cameras (one per ship), three FPV cockpit cameras (own ship hidden). Auto-cycles every 8 beats; press `C` to advance manually.
-- **Ethereal post-processing** — UnrealBloomPass at half resolution, a custom radial chromatic-aberration pass that pulses with bass, and a faint mirror world reflected below the terrain.
-- **Iridescent shimmer** — slow oil-slick hue noise in the fragment shader, BPM-driven hue offset on top.
+- **11 cameras** — five cinematic presets (eye-level, 3/4 high-side, low-left, overhead reverse, high crane), three chase cameras (one per ship), three FPV cockpit cameras (own ship hidden). There are no cuts: every shot change is a crane-style glide (≈3 s, 1.8 s on a drop) from wherever the camera is into the new mode's live pose. Presets drift gently while held; chase is a damped tether that tilts with the ship's bank. A music-driven director holds shots for 16–48 beats and moves on drops, builds and quiet onsets — never sooner than ~14 s into a shot. Press `C` to advance manually, `V` to toggle the director.
+- **Ethereal post-processing** — restrained UnrealBloomPass at half resolution (high threshold, tight radius — a halo on the brightest crests, never a wash), a whisper of radial chromatic aberration that pulses with bass, and a faint mirror world reflected below the terrain.
+- **Iridescent shimmer** — slow oil-slick hue noise in the fragment shader, BPM-driven hue offset on top, and tiny glints that drift along the crests so the grid glimmers rather than glows.
 - **Star field** — 600 points in an upper-hemisphere shell.
 - **Optional particle nebula** — toggled with `N` for added haze.
 
@@ -25,10 +26,10 @@ Since I was a kid I've watched something like this in my head whenever I've list
 
 | Key | Action |
 |-----|--------|
-| **drag canvas** | manual orbit (when not in cinematic mode) |
+| **drag canvas** | nudge the orbit in preset views (relaxes back over ~25 s) |
 | **drop audio file** | load and play |
 | **space** | play / pause |
-| **C** | next camera (cinematic preset → chase ships → cockpit ships) |
+| **C** | next camera (cinematic preset → chase ships → cockpit ships; tracked views only for ships currently in the flock) |
 | **V** | toggle cinematic auto-advance |
 | **arrows** | (chase / cockpit only) joystick — left/right yaw, up/down pitch |
 | **B** | toggle bloom |
@@ -84,7 +85,8 @@ src/
 │   ├── terrain.ts     line-grid spectrogram + shaders + bilerpHeight
 │   ├── stars.ts       full-sphere star field
 │   ├── nebula.ts      spherical particle nebula
-│   └── ship.ts        Ship type, makeShip/updateShip, formation
+│   ├── ship.ts        Ship type, kinematic flight model, formation
+│   └── flock.ts       music-energy → flock size; arrivals and departures
 │
 ├── audio/
 │   ├── sources.ts     AudioContext + analyser + file/mic/tab attach
