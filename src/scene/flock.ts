@@ -70,6 +70,7 @@ function stageArrival(ship: Ship, time: number): void {
   ship.roll = 0;
   ship.speed = 30;
   ship.accel = 0;
+  ship.load = 0;
   ship.scatterUntil = -Infinity;
   ship.diveUntil = -Infinity;
   ship.cruiseY = p.y;

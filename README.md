@@ -18,6 +18,7 @@ Since I was a kid I've watched something like this in my head whenever I've list
 - **Beat reactivity** — ships get a thrust kick on every detected peak; the whole landscape breathes vertically; the camera bass-pushes in; the cool→hot gradient drifts in hue.
 - **11 cameras** — five cinematic presets (eye-level, 3/4 high-side, low-left, overhead reverse, high crane), three chase cameras (one per ship), three FPV cockpit cameras (own ship hidden). There are no cuts: every shot change is a crane-style glide (≈3 s, 1.8 s on a drop) from wherever the camera is into the new mode's live pose. Presets drift gently while held; chase is a damped tether that tilts with the ship's bank. A music-driven director holds shots for 16–48 beats and moves on drops, builds and quiet onsets — never sooner than ~14 s into a shot. Press `C` to advance manually, `V` to toggle the director.
 - **Mood** — a build *withholds*: exposure dims, fog creeps in, the aurora fades, the camera pushes in and low, the flock draws into formation and climbs. The drop *releases*: a quarter-second flash to white, the sky ignites, the lens opens and the camera pulls back to a wide reveal while the flock scatters and dives. Genuine quiet lets the grid sink toward black — stars and the lone leader remain — and the first kick brings the light straight back.
+- **Wingtip vapour** — thin additive ribbons off each wingtip that form only under aerodynamic load (bank g, hard acceleration, the drop dive, an arrival surging in) and fade within a second, carried back into the flow with the landscape.
 - **Mountain ring** — a coarse wireframe range encircling the grid at 66–112 u, peaks breathing with the song's long arc, fading ring by ring toward the sky for atmospheric depth.
 - **Ethereal post-processing** — restrained UnrealBloomPass at half resolution (high threshold, tight radius — a halo on the brightest crests, never a wash), a whisper of radial chromatic aberration that pulses with bass, and a faint mirror world reflected below the terrain.
 - **Iridescent shimmer** — slow oil-slick hue noise in the fragment shader, BPM-driven hue offset on top, and tiny glints that drift along the crests so the grid glimmers rather than glows.
@@ -90,6 +91,7 @@ src/
 │   ├── ship.ts        Ship type, kinematic flight model, formation
 │   ├── flock.ts       music-energy → flock size; arrivals and departures
 │   ├── mood.ts        anticipation / flash / afterglow / hush scalars
+│   ├── trails.ts      wingtip vapour ribbons under load
 │   └── mountains.ts   distant wireframe range for scale
 │
 ├── audio/

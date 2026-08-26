@@ -35,6 +35,7 @@ import {
   FORMATION_SLOTS, SHIP_MAX,
   FLOCK_JOIN_SURGE, FLOCK_LEAVE_DROP, FLOCK_FADE_S,
   MOOD_FLOCK_TIGHTEN, MOOD_FLOCK_LIFT, MOOD_SCATTER_S, MOOD_DIVE_S, MOOD_DIVE_PITCH,
+  TRAIL_LOAD_SMOOTH_S,
 } from '../constants.ts';
 import { bilerpHeight, type Terrain } from './terrain.ts';
 
@@ -62,6 +63,8 @@ export type Ship = {
   speed: number;
   /** Smoothed along-path acceleration (u/s²) — pitches the nose. */
   accel: number;
+  /** 0..1 aerodynamic load (bank g, acceleration, dive) — drives vapour. */
+  load: number;
   /** Drop response: a lateral scatter target that holds until scatterUntil,
    *  and a nose-down dive until diveUntil (both absolute seconds). */
   scatterX: number;
@@ -172,6 +175,7 @@ function makeShip(
     roll: 0,
     speed: 20,
     accel: 0,
+    load: 0,
     scatterX: 0,
     scatterUntil: -Infinity,
     diveUntil: -Infinity,
@@ -387,6 +391,18 @@ export function updateShip(
   const pitchLerp = 1 - Math.exp(-SHIP_PITCH_LERP * dt);
   ship.pitch += (targetPitch - ship.pitch) * pitchLerp;
   ship.speed = Math.max(SHIP_SPEED_MIN, ship.speed + accelRaw * dt);
+
+  // Load: what the wings are working against. A coordinated turn at bank φ
+  // pulls 1/cos φ g; hard acceleration and the drop dive add to it. Smoothed
+  // so vapour blooms and fades rather than flickering frame to frame.
+  const gLoad = 1 / Math.max(0.2, Math.cos(ship.roll)) - 1;
+  const loadRaw = clamp(
+    gLoad * 2.4 + Math.abs(ship.accel) * 0.05
+      + (time < ship.diveUntil ? 0.7 : 0)
+      + (ship.phase === 'joining' ? 0.5 : 0),
+    0, 1,
+  );
+  ship.load += (loadRaw - ship.load) * (1 - Math.exp(-dt / TRAIL_LOAD_SMOOTH_S));
 
   // ----- integrate -----
   // Coordinated turn: bank → turn rate. Positive roll = left bank = heading

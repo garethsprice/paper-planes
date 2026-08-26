@@ -20,6 +20,7 @@ import { createNebula } from './scene/nebula.ts';
 import { createShips, updateShip, scatterShip } from './scene/ship.ts';
 import { createMood, updateMood } from './scene/mood.ts';
 import { createMountains } from './scene/mountains.ts';
+import { createTrails } from './scene/trails.ts';
 import { createFlock, updateFlock } from './scene/flock.ts';
 import {
   ensureAudio, getAudio, attachStream, loadAudioFile,
@@ -68,6 +69,7 @@ const shipsHandle = createShips(scene);
 const ships = shipsHandle.list;
 const formation = shipsHandle.formation;
 const flock = createFlock();
+const trails = createTrails(scene, ships);
 
 
 // ----- audio plumbing -----
@@ -370,6 +372,7 @@ function animate() {
   ships.forEach((ship, i) =>
     updateShip(ship, i, ships, formation, terrain, shipInput, i === trackedShipIdx),
   );
+  trails.update(ships, dt);
 
   // Music-driven cinematic director — synchronises cuts to drops, builds,
   // quiet sections, and beat cadence. 'V' toggles, 'C' jumps regardless.

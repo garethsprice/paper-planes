@@ -41,6 +41,16 @@ export const MOOD_SCATTER_S = 3.0;         // how long the scatter target holds
 export const MOOD_DIVE_S = 1.1;            // dive after the drop
 export const MOOD_DIVE_PITCH = 0.22;       // rad of nose-down during the dive
 
+// ----- wingtip vapour (see scene/trails.ts) -----
+// Vapour forms only under load: bank g-load, hard acceleration, the drop
+// dive, an arrival surging in. LOAD_ON..LOAD_FULL is the smoothstep window
+// on the smoothed load; the ribbon holds TRAIL_SAMPLES frames of history.
+export const TRAIL_SAMPLES = 42;
+export const TRAIL_ALPHA = 0.65;
+export const TRAIL_LOAD_ON = 0.2;
+export const TRAIL_LOAD_FULL = 0.7;
+export const TRAIL_LOAD_SMOOTH_S = 0.18;
+
 // ----- mountain ring (see scene/mountains.ts) -----
 export const MOUNTAIN_RADII = [66, 72, 78, 84, 90, 97, 104, 112];
 export const MOUNTAIN_SEGMENTS = 160;
