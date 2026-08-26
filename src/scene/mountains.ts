@@ -67,7 +67,14 @@ const FRAG = /* glsl */ `
 export type Mountains = {
   mesh: THREE.LineSegments;
   material: THREE.ShaderMaterial;
-  update: (envelope: number, time: number) => void;
+  /**
+   * @param envelope 0..1 long-term energy: raises the peaks
+   * @param time     scene seconds (slow sway)
+   * @param scroll   world-Z offset of the height field — advancing it moves
+   *                 the range past the viewer with natural parallax
+   * @param breath   0..1 beat envelope: a faint swell on the crests
+   */
+  update: (envelope: number, time: number, scroll: number, breath: number) => void;
 };
 
 export function createMountains(
@@ -125,36 +132,35 @@ export function createMountains(
   mesh.renderOrder = -1; // behind everything translucent
   scene.add(mesh);
 
-  // Static profile per vertex — a continuous 2-D noise field over world XZ
-  // (so rings and spokes trace one surface rather than a fence), two
-  // octaves, rising with radius so foothills climb into peaks at the back.
-  const profile = new Float32Array(count);
+  // Per-vertex rise with radius so foothills climb into peaks at the back.
+  const rise = new Float32Array(count);
   for (let r = 0; r < rings; r++) {
-    const rise = 0.55 + 0.45 * (rings > 1 ? r / (rings - 1) : 1);
-    for (let i = 0; i < N; i++) {
-      const v = r * N + i;
-      const x = positions[v * 3];
-      const z = positions[v * 3 + 2];
+    const k = 0.55 + 0.45 * (rings > 1 ? r / (rings - 1) : 1);
+    for (let i = 0; i < N; i++) rise[r * N + i] = k;
+  }
+
+  const update = (envelope: number, time: number, scroll: number, breath: number): void => {
+    // Heights come from a continuous 2-D noise field over world XZ (so
+    // rings and spokes trace one surface rather than a fence), sampled at
+    // z + scroll: advancing the scroll slides the whole field through the
+    // ring, so peaks ahead grow and pass while the far rings crawl —
+    // parallax, the cue that says "we are moving through this". The range
+    // breathes with the long-term energy (quiet leaves low foothills, a full
+    // section raises the peaks) and the crests swell faintly on the beat.
+    const lift = (0.4 + 0.6 * envelope) * (1 + breath * 0.025);
+    const arr = posAttr.array as Float32Array;
+    for (let v = 0; v < count; v++) {
+      const x = arr[v * 3];
+      const z = arr[v * 3 + 2] + scroll;
       const n1 = noise3(x * 0.014, z * 0.014, 1.7) * 0.5 + 0.5;
       const n2 = noise3(x * 0.045, z * 0.045, 4.1) * 0.5 + 0.5;
       const shape = Math.pow(n1 * 0.72 + n2 * 0.28, 1.8);
-      profile[v] = (6 + 40 * shape) * rise;
-    }
-  }
-
-  const update = (envelope: number, time: number): void => {
-    // The range breathes with the long-term energy: quiet music leaves low
-    // foothills, a full section raises the peaks. A very slow drift keeps
-    // the silhouette alive.
-    const lift = 0.4 + 0.6 * envelope;
-    const arr = posAttr.array as Float32Array;
-    for (let v = 0; v < count; v++) {
-      const sway = 1 + 0.06 * Math.sin(time * 0.05 + v * 0.37);
-      arr[v * 3 + 1] = profile[v] * lift * sway;
+      const sway = 1 + 0.04 * Math.sin(time * 0.05 + v * 0.37);
+      arr[v * 3 + 1] = (6 + 40 * shape) * rise[v] * lift * sway;
     }
     posAttr.needsUpdate = true;
     material.uniforms.uPeak.value = 56 * lift;
   };
-  update(0.5, 0);
+  update(0.5, 0, 0, 0);
   return { mesh, material, update };
 }

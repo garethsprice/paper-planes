@@ -3,6 +3,7 @@ import {
   COLS, ROWS, HEIGHT_SCALE, NOISE_AMP, BLOOM_DIVISOR, TERRAIN_ROW_SPACING, CAM_BLEND_MANUAL_S,
   TERRAIN_ROW_BLEND, TERRAIN_SWELL, TERRAIN_BREATH_ATTACK, TERRAIN_BREATH_RELEASE, TERRAIN_BREATH_AMP,
   MOOD_FOG_BUILD, MOOD_DIM_HUSH, MOOD_FOV_AFTERGLOW, MOOD_SCATTER_X,
+  MOUNTAIN_PARALLAX, MOUNTAIN_PARALLAX_ENERGY,
   SUN_AZIMUTH_X, SUN_AZIMUTH_Z, SUN_ELEV_MIN_DEG, SUN_ELEV_MAX_DEG, SUN_ARC_S,
   SUN_INTENSITY_MIN, SUN_HUSH_DIM,
 } from './constants.ts';
@@ -69,6 +70,7 @@ const SUN_EMBER = new THREE.Color(0.95, 0.28, 0.08);
 const SUN_GOLD = new THREE.Color(1.0, 0.8, 0.5);
 const mood = createMood();
 let mountainEnvelope = 0.5; // slow-smoothed flock energy that raises the range
+let mountainScroll = 0;     // world-Z offset of the range's height field (parallax)
 const FOG_NEAR_BASE = sceneCore.fog.near;
 const FOG_FAR_BASE = sceneCore.fog.far;
 
@@ -454,7 +456,10 @@ function animate() {
   }
   // Distant range breathes with the song's long arc and dims with the hush.
   mountainEnvelope += (flock.energy - mountainEnvelope) * (1 - Math.exp(-dt / 4));
-  mountains.update(mountainEnvelope, t);
+  // The range drifts past at a fraction of the ground flow — the planes fly
+  // +Z into the flow, so the field moves −Z like the ground, just far slower.
+  mountainScroll += groundFlow * MOUNTAIN_PARALLAX * (1 + MOUNTAIN_PARALLAX_ENERGY * mountainEnvelope) * dt;
+  mountains.update(mountainEnvelope, t, mountainScroll, breath);
   mountains.material.uniforms.uLift.value = 1 - 0.55 * mood.hush;
   // mirror world fades down when the scene is quiet
   mirrorMaterial.uniforms.uOpacity.value = 0.10 * I * (1 - mood.hush);

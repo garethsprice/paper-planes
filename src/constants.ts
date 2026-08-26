@@ -73,6 +73,11 @@ export const SUN_MOUNTAIN_RIM = 0.55;      // glow on crests facing the light
 // ----- mountain ring (see scene/mountains.ts) -----
 export const MOUNTAIN_RADII = [66, 72, 78, 84, 90, 97, 104, 112];
 export const MOUNTAIN_SEGMENTS = 160;
+// Parallax: the range's height field scrolls through world Z at this
+// fraction of the ground flow (a distant range passes far slower than the
+// ground), scaled by musical energy so the journey quickens with the song.
+export const MOUNTAIN_PARALLAX = 0.035;
+export const MOUNTAIN_PARALLAX_ENERGY = 0.9; // +90% at full energy
 
 // ----- post-processing -----
 // Bloom RT divisor — half the canvas size keeps bloom roughly the same look
