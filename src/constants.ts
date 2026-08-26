@@ -163,30 +163,55 @@ export const SHIP_ACCEL_SMOOTH_S = 0.25;
 // Quiet music flies a single plane; the flock grows toward SHIP_MAX as the
 // music intensifies and disperses again as it calms. Energy is normalised
 // against a slowly decaying running maximum, so any source level works.
-export const SHIP_MAX = 12;
-export const FLOCK_ENERGY_RISE_S = 2.0;    // EMA time constant while energy is rising
-export const FLOCK_ENERGY_FALL_S = 5.0;    // …and while falling — the flock lingers
+export const SHIP_MAX = 28;
+export const FLOCK_ENERGY_RISE_S = 1.6;    // EMA time constant while energy is rising
+export const FLOCK_ENERGY_FALL_S = 3.5;    // …and while falling — the flock thins promptly
 export const FLOCK_MAX_MEMORY_S = 90;      // running-max memory (relative decay time constant)
+// Energy → size. The band [E_LO, E_HI] of normalised energy maps to 0..1,
+// then size = 1 + (MAX-1) · u^EXPONENT. Steep: a verse flies one or two,
+// a loud section a handful, and only the peak of the song (energy ≥ ~0.9
+// of its recent maximum) brings the whole flock.
+export const FLOCK_E_LO = 0.4;
+export const FLOCK_E_HI = 1.0;
+export const FLOCK_EXPONENT = 6.0;
 export const FLOCK_JOIN_HOLD_S = 0.8;      // energy must ask for more for this long
-export const FLOCK_LEAVE_HOLD_S = 2.5;     // …or for fewer for this long
-export const FLOCK_JOIN_INTERVAL_S = 1.4;  // min spacing between arrivals
-export const FLOCK_LEAVE_INTERVAL_S = 1.6; // min spacing between departures
+export const FLOCK_LEAVE_HOLD_S = 1.2;     // …or for fewer for this long
+// Spacing between arrivals / departures scales with the gap: a change of
+// one is unhurried, a deficit of six or more floods in — the explosion —
+// and a surplus of six thins briskly so a crowd never lingers in a lull.
+export const FLOCK_JOIN_INTERVAL_S = 1.4;
+export const FLOCK_JOIN_INTERVAL_FAST_S = 0.3;
+export const FLOCK_LEAVE_INTERVAL_S = 1.2;
+export const FLOCK_LEAVE_INTERVAL_FAST_S = 0.4;
 export const FLOCK_JOIN_DIST = 26;         // arrivals spawn this far behind the box (u)
 export const FLOCK_JOIN_SURGE = 14;        // extra airspeed while catching up (u/s)
 export const FLOCK_LEAVE_DROP = 9;         // airspeed shed while peeling away (u/s)
 export const FLOCK_FADE_S = 1.6;           // opacity fade in/out (s)
 
-// Formation slots, leader-relative, for up to SHIP_MAX planes: a widening V
-// trailing the leader. Noses point +Z (into the flow), so "behind" is −Z.
-export const FORMATION_SLOTS: { dx: number; dz: number }[] = Array.from(
-  { length: SHIP_MAX },
-  (_, k) => {
-    if (k === 0) return { dx: 0, dz: 0 };
-    const rank = Math.ceil(k / 2);
-    const side = k % 2 === 1 ? -1 : 1;
-    return { dx: side * 3.2 * rank, dz: -2.6 * rank };
-  },
-);
+// Formation slots, leader-relative, for up to SHIP_MAX planes: a triangular
+// lattice trailing the leader — row k holds k+1 planes, so 100 planes make
+// a wedge ~13 rows deep and ~36 u wide, which fits the box. Noses point +Z
+// (into the flow), so "behind" is −Z.
+export const FORMATION_SLOTS: { dx: number; dz: number }[] = (() => {
+  const slots: { dx: number; dz: number }[] = [];
+  for (let row = 0; slots.length < SHIP_MAX; row++) {
+    for (let j = 0; j <= row && slots.length < SHIP_MAX; j++) {
+      slots.push({ dx: (j - row / 2) * 2.8, dz: -2.6 * row });
+    }
+  }
+  return slots;
+})();
+
+// Separation: planes closer than this push each other apart (lateral and
+// vertical target offsets), so a dense flock never flies through itself.
+export const SHIP_SEP_RADIUS = 3.2;
+export const SHIP_SEP_STRENGTH = 2.2;
+export const SHIP_SEP_MAX = 4.0;
+
+// Coarse terrain envelope for altitude hold: the 129×129 height grid is
+// max-filtered into cells of this many vertices once per frame; ships read
+// the cells instead of sampling the fine grid.
+export const ENVELOPE_CELL = 8;
 
 // ----- camera spring (preset orbit) -----
 // Critically damped and slow (ω ≈ 1.5 rad/s, ζ ≈ 1): a preset change glides

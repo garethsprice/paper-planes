@@ -18,10 +18,11 @@ import {
 import { dom } from './ui/dom.ts';
 import { createFrame } from './frame.ts';
 import { createSceneCore } from './scene/core.ts';
-import { createTerrain, sampleLogBin, bilerpHeight } from './scene/terrain.ts';
+import { createTerrain, sampleLogBin, bilerpHeight, updateEnvelope } from './scene/terrain.ts';
 import { createStars } from './scene/stars.ts';
 import { createNebula } from './scene/nebula.ts';
-import { createShips, updateShip, scatterShip, applyShipLighting } from './scene/ship.ts';
+import { createShips, updateShip, scatterShip, separateShips } from './scene/ship.ts';
+import { createShipRenderer } from './scene/shipRender.ts';
 import { createSky } from './scene/sky.ts';
 import { createSparks } from './scene/sparks.ts';
 import { createMood, updateMood } from './scene/mood.ts';
@@ -79,11 +80,12 @@ const FOG_NEAR_BASE = sceneCore.fog.near;
 const FOG_FAR_BASE = sceneCore.fog.far;
 
 // ----- ships + formation flight (factories live in src/scene/ship.ts) -----
-const shipsHandle = createShips(scene, uniforms);
+const shipsHandle = createShips();
+const shipRenderer = createShipRenderer(scene, uniforms);
 const ships = shipsHandle.list;
 const formation = shipsHandle.formation;
 const flock = createFlock();
-const trails = createTrails(scene, ships);
+const trails = createTrails(scene);
 
 
 // ----- audio plumbing -----
@@ -399,10 +401,12 @@ function animate() {
     anticipation: mood.anticipation,
   };
   // Index order matters: wingmen read the leader's target from this frame.
+  updateEnvelope(terrain);
+  separateShips(ships);
   ships.forEach((ship, i) =>
     updateShip(ship, i, ships, formation, terrain, shipInput, i === trackedShipIdx),
   );
-  trails.update(ships, dt);
+  trails.update(ships);
 
   // Music-driven cinematic director — synchronises cuts to drops, builds,
   // quiet sections, and beat cadence. 'V' toggles, 'C' jumps regardless.
@@ -470,9 +474,7 @@ function animate() {
   // The dome rides with the camera so it is never clipped by the far plane
   // and every fragment's direction is exact.
   sky.mesh.position.copy(camera.position);
-  for (const ship of ships) {
-    applyShipLighting(ship, uniforms.uLightDir.value, uniforms.uSunColor.value, uniforms.uSun.value);
-  }
+  shipRenderer.update(ships, uniforms);
   // Distant range breathes with the song's long arc and dims with the hush.
   mountainEnvelope += (flock.energy - mountainEnvelope) * (1 - Math.exp(-dt / 4));
   // The range drifts past at a fraction of the ground flow — the planes fly

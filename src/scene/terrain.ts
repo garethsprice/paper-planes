@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import { createNoise3D, type NoiseFunction3D } from 'simplex-noise';
-import { COLS, ROWS, WIDTH, DEPTH } from '../constants.ts';
+import { COLS, ROWS, WIDTH, DEPTH, ENVELOPE_CELL } from '../constants.ts';
 import type { SceneCore, SharedUniforms } from './core.ts';
 
 const TERRAIN_VERTEX_SHADER = /* glsl */ `
@@ -150,6 +150,10 @@ export type Terrain = {
   binMap: Float32Array;
   /** Simplex-noise instance shared with the ships (wander targets). */
   noise3: NoiseFunction3D;
+  /** Max-filtered height per ENVELOPE_CELL² block, envCols × envRows. */
+  envelope: Float32Array;
+  envCols: number;
+  envRows: number;
 };
 
 export function createTerrain(core: SceneCore): Terrain {
@@ -214,6 +218,9 @@ export function createTerrain(core: SceneCore): Terrain {
   mirror.scale.y = -1; // reflects through the y=0 plane
   core.scene.add(mirror);
 
+  const envCols = Math.ceil((COLS - 1) / ENVELOPE_CELL);
+  const envRows = Math.ceil((ROWS - 1) / ENVELOPE_CELL);
+
   // Per-vertex Y buffer + log-frequency bin lookup + noise.
   const heights = new Float32Array(COLS * ROWS);
   const binMap = new Float32Array(COLS);
@@ -233,7 +240,44 @@ export function createTerrain(core: SceneCore): Terrain {
     heights,
     binMap,
     noise3: createNoise3D(),
+    envelope: new Float32Array(envCols * envRows),
+    envCols,
+    envRows,
   };
+}
+
+/** Rebuild the coarse envelope from the fine heights (call once per frame,
+ *  after the row write). ~16k reads; far cheaper than every ship sampling
+ *  the fine grid fifteen times. */
+export function updateEnvelope(terrain: Terrain): void {
+  const { heights, envelope, envCols, envRows } = terrain;
+  for (let cz = 0; cz < envRows; cz++) {
+    const iy0 = cz * ENVELOPE_CELL;
+    const iy1 = Math.min(ROWS, iy0 + ENVELOPE_CELL + 1);
+    for (let cx = 0; cx < envCols; cx++) {
+      const ix0 = cx * ENVELOPE_CELL;
+      const ix1 = Math.min(COLS, ix0 + ENVELOPE_CELL + 1);
+      let m = -Infinity;
+      for (let iy = iy0; iy < iy1; iy++) {
+        const row = iy * COLS;
+        for (let ix = ix0; ix < ix1; ix++) {
+          const h = heights[row + ix];
+          if (h > m) m = h;
+        }
+      }
+      envelope[cz * envCols + cx] = m;
+    }
+  }
+}
+
+/** Envelope cell max at a world XZ (clamped to the grid). */
+export function envelopeAt(terrain: Terrain, wx: number, wz: number): number {
+  const { envelope, envCols, envRows } = terrain;
+  const fx = (wx / WIDTH + 0.5) * (COLS - 1) / ENVELOPE_CELL;
+  const fz = (wz / DEPTH + 0.5) * (ROWS - 1) / ENVELOPE_CELL;
+  const cx = Math.max(0, Math.min(envCols - 1, fx | 0));
+  const cz = Math.max(0, Math.min(envRows - 1, fz | 0));
+  return envelope[cz * envCols + cx];
 }
 
 /** Bilinear height sample at world XZ — used by ship altitude tracking. */

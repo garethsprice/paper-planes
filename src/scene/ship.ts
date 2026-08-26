@@ -9,6 +9,10 @@
 //   bank → coordinated turn (ω = g·tan φ / v) → heading deviates → lateral drift
 //   pitch → climb/dive along the path (dives speed up, climbs bleed speed)
 //   throttle → surge forward / fall back against the flow
+//   acceleration → nose down (dives for speed) / nose up (flares)
+//
+// Ships are pure state here — a Group carries position and quaternion, and
+// scene/shipRender.ts draws the whole flock in two instanced draws.
 //
 // Per frame, updateShip():
 //   1. picks a wander/formation target (noise + spectral centroid),
@@ -16,7 +20,7 @@
 //      airspeed from Z station-keeping plus the music,
 //   3. eases roll/pitch/speed toward those commands (rate-limited, first-order),
 //   4. integrates heading, position (nose motion − flow advection),
-//   5. enforces the terrain floor and X/Z bounds, and writes the mesh transform.
+//   5. enforces the terrain floor and X/Z bounds, and writes the transform.
 
 import * as THREE from 'three';
 import {
@@ -31,28 +35,34 @@ import {
   SHIP_ALT_GAIN, SHIP_VY_MAX, SHIP_ALT_WANDER, SHIP_VISUAL_AOA,
   SHIP_ENVELOPE_RISE, SHIP_ENVELOPE_SINK,
   SHIP_ACCEL_TO_PITCH, SHIP_ACCEL_TO_NOSE, SHIP_ACCEL_SMOOTH_S,
+  SHIP_SEP_RADIUS, SHIP_SEP_STRENGTH, SHIP_SEP_MAX,
   TERRAIN_ROW_SPACING,
   FORMATION_SLOTS, SHIP_MAX,
   FLOCK_JOIN_SURGE, FLOCK_LEAVE_DROP, FLOCK_FADE_S,
   MOOD_FLOCK_TIGHTEN, MOOD_FLOCK_LIFT, MOOD_SCATTER_S, MOOD_DIVE_S, MOOD_DIVE_PITCH,
-  TRAIL_LOAD_SMOOTH_S, SUN_SHIP_RIM, SHIP_PANEL_COLOR, SHIP_PANEL_OPACITY,
+  TRAIL_LOAD_SMOOTH_S,
 } from '../constants.ts';
-import { bilerpHeight, type Terrain } from './terrain.ts';
+import { bilerpHeight, envelopeAt, type Terrain } from './terrain.ts';
 
 /** Flock membership. dormant ships are hidden and skipped; joining ships
  *  surge in from behind; leaving ships throttle back, bank outward and
  *  fade as the landscape carries them away. */
 export type ShipPhase = 'dormant' | 'joining' | 'active' | 'leaving';
 
+export type LightUniforms = {
+  uLightDir: { value: THREE.Vector3 };
+  uSunColor: { value: THREE.Color };
+  uSun: { value: number };
+};
+
 export type Ship = {
+  /** Transform holder (position + quaternion); no children — see shipRender. */
   group: THREE.Group;
   phase: ShipPhase;
   /** 0..1 opacity, eased during join/leave. */
   fade: number;
   /** Which way (±X) a leaving ship peels away. */
   leaveSide: number;
-  edgeMaterial: THREE.LineBasicMaterial;
-  panelMaterial: THREE.ShaderMaterial;
   /** Yaw (rad). Body-forward is local −Z, so heading π flies into the flow (+Z). */
   heading: number;
   /** Flight-path angle (rad), positive = climbing. */
@@ -70,6 +80,9 @@ export type Ship = {
   scatterX: number;
   scatterUntil: number;
   diveUntil: number;
+  /** Separation offsets from neighbours (see separateShips). */
+  sepX: number;
+  sepY: number;
   /** Slow-relaxing cruise altitude: rises quickly onto a loud passage's
    *  terrain envelope, sinks gently after it. See updateShip. */
   cruiseY: number;
@@ -90,145 +103,17 @@ export type Formation = {
 export type Ships = {
   list: Ship[];
   formation: Formation;
-  geometry: THREE.BufferGeometry;
-  panelGeometry: THREE.BufferGeometry;
 };
 
-// Shared wedge vertices — the edge outline and the paper panels index into
-// the same five points.
-const SHIP_VERTS = new Float32Array([
-   0,      0,   -1.6,   // 0: nose tip — long, prominent
-  -0.65,   0,    0.6,   // 1: back-left wing tip
-   0,      0,    0.3,   // 2: back-notch (top of rear face)
-   0.65,   0,    0.6,   // 3: back-right wing tip
-   0,     -0.5,  0.3,   // 4: keel-tail (bottom of rear face)
-]);
-
-function buildShipGeometry(): THREE.BufferGeometry {
-  // Long sharp nose at local −Z (three.js camera convention: body_forward =
-  // (0,0,−1)). Wings are short and swept back so the silhouette unambiguously
-  // points forward.
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.BufferAttribute(SHIP_VERTS, 3));
-  geom.setIndex([
-    0, 1,  1, 2,  2, 3,  3, 0,  // top outline
-    0, 4,                        // diagonal belly seam
-    2, 4,                        // rear vertical
-    1, 4,  3, 4,                 // wing tips drop to the keel
-  ]);
-  return geom;
-}
-
-// Panel shader — thin frosted paper lit by the horizon sun. The face normal
-// comes from screen-space derivatives of the world position (flat shading
-// without touching the shared 5-vertex geometry), flipped to face the viewer
-// because a sheet has two sides. Lighting is:
-//   ambient   — hemisphere: top surfaces lighter than the keel, so the wedge
-//               has form even with the sun below the horizon;
-//   diffuse   — wrapped Lambert (light bleeds round the terminator as it
-//               does on paper);
-//   transmit  — light striking the far side shows through, strongest when
-//               the sun sits behind the sheet from the viewer's eye, so a
-//               plane crossing the glow lights up like a lantern.
-const PANEL_VERT = /* glsl */ `
-  varying vec3 vWorldPos;
-  void main() {
-    vec4 wp = modelMatrix * vec4(position, 1.0);
-    vWorldPos = wp.xyz;
-    gl_Position = projectionMatrix * viewMatrix * wp;
-  }
-`;
-const PANEL_FRAG = /* glsl */ `
-  varying vec3 vWorldPos;
-  uniform vec3 uLightDir;
-  uniform vec3 uSunColor;
-  uniform float uSun;
-  uniform vec3 uBase;
-  uniform float uOpacity;
-  void main() {
-    vec3 n = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
-    vec3 v = normalize(cameraPosition - vWorldPos);
-    if (dot(n, v) < 0.0) n = -n;
-    float ndl = dot(n, uLightDir);
-    float hemi = 0.7 + 0.6 * (n.y * 0.5 + 0.5);
-    float wrap = clamp(ndl * 0.6 + 0.4, 0.0, 1.0);
-    float transmit = clamp(-ndl, 0.0, 1.0);
-    float backlit = pow(max(dot(-v, uLightDir), 0.0), 8.0);
-    vec3 col = uBase * hemi
-      + uSunColor * uSun * (wrap * 0.3 + transmit * (0.1 + backlit * 0.6));
-    float alpha = uOpacity * (1.0 - backlit * uSun * 0.35);
-    gl_FragColor = vec4(col, alpha);
-  }
-`;
-
-export type LightUniforms = {
-  uLightDir: { value: THREE.Vector3 };
-  uSunColor: { value: THREE.Color };
-  uSun: { value: number };
-};
-
-function createPanelMaterial(light: LightUniforms, opacity: number): THREE.ShaderMaterial {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      uLightDir: light.uLightDir,
-      uSunColor: light.uSunColor,
-      uSun: light.uSun,
-      uBase: { value: new THREE.Color(SHIP_PANEL_COLOR) },
-      uOpacity: { value: opacity },
-    },
-    vertexShader: PANEL_VERT,
-    fragmentShader: PANEL_FRAG,
-    transparent: true,
-    side: THREE.DoubleSide,
-  });
-}
-
-/** Translucent paper panels filling the wedge. Legibility first: a bare
- *  wireframe plane vanishes against the bright grid behind it, whereas a
- *  frosted body occludes the lines and gives the eye a silhouette — and
- *  once lit (see the panel shader) it gives the wedge form. */
-function buildShipPanels(): THREE.BufferGeometry {
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.BufferAttribute(SHIP_VERTS, 3));
-  geom.setIndex([
-    0, 1, 2,  0, 2, 3,   // top wing surfaces
-    0, 4, 1,  0, 3, 4,   // belly panels down to the keel
-    1, 4, 2,  2, 4, 3,   // rear face
-  ]);
-  return geom;
-}
-
-function makeShip(
-  scene: THREE.Scene,
-  geom: THREE.BufferGeometry,
-  panelGeom: THREE.BufferGeometry,
-  light: LightUniforms,
-  seed: number,
-  x0: number,
-  z0: number,
-  present: boolean,
-): Ship {
-  // Materials are per ship so each can fade independently. Edges: glowing
-  // near-white. Panels: lit frosted paper (see PANEL_FRAG), depthWrite on
-  // so grid lines behind the body are hidden rather than blended through;
-  // added first so the outline always draws on top.
-  const edgeMaterial = new THREE.LineBasicMaterial({
-    color: 0xeaffff, fog: false, transparent: true, opacity: present ? 1 : 0,
-  });
-  const panelMaterial = createPanelMaterial(light, present ? SHIP_PANEL_OPACITY : 0);
+function makeShip(seed: number, x0: number, z0: number, present: boolean): Ship {
   const group = new THREE.Group();
-  group.add(new THREE.Mesh(panelGeom, panelMaterial));
-  group.add(new THREE.LineSegments(geom, edgeMaterial));
   group.position.set(x0, 4, z0);
   group.visible = present;
-  scene.add(group);
   return {
     group,
     phase: present ? 'active' : 'dormant',
     fade: present ? 1 : 0,
     leaveSide: 1,
-    edgeMaterial,
-    panelMaterial,
     heading: Math.PI, // nose into the flow
     pitch: 0,
     roll: 0,
@@ -238,6 +123,8 @@ function makeShip(
     scatterX: 0,
     scatterUntil: -Infinity,
     diveUntil: -Infinity,
+    sepX: 0,
+    sepY: 0,
     cruiseY: 4,
     wanderSeed: seed,
     lastTargetX: x0,
@@ -247,16 +134,14 @@ function makeShip(
 
 /** All SHIP_MAX ships are created up front; only the leader starts present.
  *  The flock controller (scene/flock.ts) wakes and retires the rest. */
-export function createShips(scene: THREE.Scene, light: LightUniforms): Ships {
-  const geometry = buildShipGeometry();
-  const panelGeometry = buildShipPanels();
+export function createShips(): Ships {
   const list = Array.from({ length: SHIP_MAX }, (_, i) =>
-    makeShip(scene, geometry, panelGeometry, light, 13.7 + i * 53.6, 0, SHIP_Z_CENTER, i === 0),
+    makeShip(13.7 + i * 53.6, 0, SHIP_Z_CENTER, i === 0),
   );
   const formation: Formation = {
     active: false, startedAt: 0, endsAt: 0, blendIn: 0, blendOut: 0,
   };
-  return { list, formation, geometry, panelGeometry };
+  return { list, formation };
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -281,28 +166,6 @@ export type ShipUpdateInput = {
   arrowKeys: { left: boolean; right: boolean; up: boolean; down: boolean };
 };
 
-const _up = new THREE.Vector3();
-const SHIP_EDGE_BASE = new THREE.Color(0xeaffff);
-
-/** Edge lighting from the horizon sun: the wing surface facing the light
- *  brightens and warms, so a banking plane's outline visibly turns toward
- *  or away from it (lines have no normals, so the wing's up vector stands
- *  in). The panels light themselves per face in their shader. */
-export function applyShipLighting(
-  ship: Ship,
-  lightDir: THREE.Vector3,
-  sunColor: THREE.Color,
-  sun: number,
-): void {
-  if (ship.phase === 'dormant') return;
-  _up.set(0, 1, 0).applyQuaternion(ship.group.quaternion);
-  const facing = Math.max(0, _up.dot(lightDir) * 0.5 + 0.5);
-  const k = facing * facing * sun * SUN_SHIP_RIM;
-  const c = ship.edgeMaterial.color;
-  c.copy(SHIP_EDGE_BASE).multiplyScalar(0.85 + k * 0.6);
-  c.lerp(sunColor, k * 0.6);
-}
-
 /** Fire the drop response on a ship: scatter sideways and dive. */
 export function scatterShip(ship: Ship, time: number, lateral: number): void {
   ship.scatterX = lateral;
@@ -310,11 +173,50 @@ export function scatterShip(ship: Ship, time: number, lateral: number): void {
   ship.diveUntil = time + MOOD_DIVE_S;
 }
 
+/**
+ * Neighbour separation. Each present ship gets a lateral and vertical
+ * target offset pushing it away from anything closer than SEP_RADIUS, from
+ * last frame's positions. O(n²) with an early Z reject — 100 ships is
+ * ~5 000 pair checks, well under a tenth of a millisecond.
+ */
+export function separateShips(ships: Ship[]): void {
+  const R = SHIP_SEP_RADIUS;
+  const R2 = R * R;
+  for (const s of ships) { s.sepX = 0; s.sepY = 0; }
+  for (let i = 0; i < ships.length; i++) {
+    const a = ships[i];
+    if (a.phase === 'dormant') continue;
+    const pa = a.group.position;
+    for (let j = i + 1; j < ships.length; j++) {
+      const b = ships[j];
+      if (b.phase === 'dormant') continue;
+      const pb = b.group.position;
+      const dz = pa.z - pb.z;
+      if (dz > R || dz < -R) continue;
+      const dx = pa.x - pb.x;
+      const dy = pa.y - pb.y;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= R2 || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const push = (R - d) / R * SHIP_SEP_STRENGTH;
+      // Mostly sideways; a little vertical so a column of planes fans out.
+      const px = (dx / d) * push;
+      const py = (dy / d) * push * 0.5;
+      a.sepX += px; a.sepY += py;
+      b.sepX -= px; b.sepY -= py;
+    }
+  }
+  for (const s of ships) {
+    s.sepX = clamp(s.sepX, -SHIP_SEP_MAX, SHIP_SEP_MAX);
+    s.sepY = clamp(s.sepY, -SHIP_SEP_MAX * 0.5, SHIP_SEP_MAX * 0.5);
+  }
+}
+
 // Reused per-frame scratch — Three.js objects are heavy to allocate.
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
 
-/** Advance one ship by dt and write its mesh transform. Ships must be
- *  updated in index order: wingmen read the leader's target from this frame.
+/** Advance one ship by dt and write its transform. Ships must be updated in
+ *  index order: wingmen read the leader's target from this frame.
  *  `piloted` ships (chase/cockpit) accept arrow-key overrides and skip
  *  formation so the stick is never fought. */
 export function updateShip(
@@ -370,6 +272,8 @@ export function updateShip(
   if (leaving) targetX = ship.leaveSide * (SHIP_X_BOUND + 14);
   ship.lastTargetX = targetX;
   ship.lastTargetZ = targetZ;
+  // Neighbours push the target sideways so the flock keeps its spacing.
+  targetX = clamp(targetX + ship.sepX, -SHIP_X_BOUND - 2, SHIP_X_BOUND + 2);
 
   // ----- bank command from lateral guidance -----
   // Desired sideways speed from X error, turned into a heading deviation
@@ -389,10 +293,10 @@ export function updateShip(
   // ----- pitch command from altitude error -----
   // The terrain streams past far faster than the plane could ever contour
   // it, so the plane rides a slow *envelope*: the highest terrain in a patch
-  // ahead and to either side, which cruiseY climbs onto quickly and sinks
-  // away from gently. Loud passages lift the whole flight; quiet ones let it
-  // drift back down to skim the grid. A slow noise offset keeps the line
-  // from going flat.
+  // ahead and to either side (read from the coarse max-filtered grid), which
+  // cruiseY climbs onto quickly and sinks away from gently. Loud passages
+  // lift the whole flight; quiet ones let it drift back down to skim the
+  // grid. A slow noise offset keeps the line from going flat.
   const fwdX = -Math.sin(ship.heading);
   const fwdZ = -Math.cos(ship.heading);
   const rightX = fwdZ;
@@ -402,14 +306,17 @@ export function updateShip(
     const ax = p.x + fwdX * SHIP_LOOKAHEAD_DIST * i * 0.25;
     const az = p.z + fwdZ * SHIP_LOOKAHEAD_DIST * i * 0.25;
     for (let side = -1; side <= 1; side++) {
-      const h = bilerpHeight(terrain, ax + rightX * side * 2, az + rightZ * side * 2);
+      const h = envelopeAt(terrain, ax + rightX * side * 2, az + rightZ * side * 2);
       if (h > envelope) envelope = h;
     }
   }
   const altWander = terrain.noise3(time * 0.05, ship.wanderSeed + 200, 0) * SHIP_ALT_WANDER;
   // A build lifts the whole flock; the drop lets it dive back down.
   const lift = anticipation * MOOD_FLOCK_LIFT;
-  const envelopeY = clamp(envelope + SHIP_CLEARANCE + altWander + lift, SHIP_Y_MIN, SHIP_Y_MAX + lift);
+  const envelopeY = clamp(
+    envelope + SHIP_CLEARANCE + altWander + lift + ship.sepY,
+    SHIP_Y_MIN, SHIP_Y_MAX + lift,
+  );
   if (envelopeY > ship.cruiseY) {
     ship.cruiseY += (envelopeY - ship.cruiseY) * (1 - Math.exp(-SHIP_ENVELOPE_RISE * dt));
   } else {
@@ -531,10 +438,8 @@ export function updateShip(
       ship.group.visible = false;
     }
   }
-  ship.edgeMaterial.opacity = ship.fade;
-  ship.panelMaterial.uniforms.uOpacity.value = SHIP_PANEL_OPACITY * ship.fade;
 
-  // ----- mesh attitude -----
+  // ----- attitude -----
   // The nose rides a few degrees above the flight path (angle of attack),
   // which is what makes a gliding paper plane read as *flying* rather than
   // sliding along a rail — and it leads the acceleration: pushing forward

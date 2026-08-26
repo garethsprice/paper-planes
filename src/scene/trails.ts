@@ -1,8 +1,10 @@
-// Wingtip vapour. Two thin ribbons per ship, each a short history of that
-// wingtip's world position, drawn as a line strip whose per-vertex alpha is
-// the aerodynamic load at the moment of emission times an age fade. Vapour
-// therefore appears only when the wings are working — a hard bank, the
-// drop dive, an arrival surging in — and is gone within a second.
+// Wingtip vapour for the whole flock in one draw. Every ship owns two
+// ribbons (one per wingtip), each a short history of that tip's world
+// position; all ribbons live in a single indexed LineSegments so a hundred
+// planes' vapour is one draw call. Per-vertex alpha is the aerodynamic
+// load at the moment of emission times an age fade, so vapour appears only
+// when the wings are working — a hard bank, the drop dive, an arrival
+// surging in — and is gone within a second.
 //
 // The air moves with the landscape (the conveyor), so stored points are
 // advected −Z by one grid row per frame exactly as the terrain is. A
@@ -11,7 +13,7 @@
 
 import * as THREE from 'three';
 import {
-  TRAIL_SAMPLES, TRAIL_ALPHA, TRAIL_LOAD_ON, TRAIL_LOAD_FULL, TERRAIN_ROW_SPACING,
+  SHIP_MAX, TRAIL_SAMPLES, TRAIL_ALPHA, TRAIL_LOAD_ON, TRAIL_LOAD_FULL, TERRAIN_ROW_SPACING,
 } from '../constants.ts';
 import type { Ship } from './ship.ts';
 
@@ -27,23 +29,17 @@ const FRAG = /* glsl */ `
   varying float vAlpha;
   uniform vec3 uColor;
   void main() {
+    if (vAlpha < 0.002) discard;
     gl_FragColor = vec4(uColor * vAlpha, vAlpha);
   }
 `;
 
-// Wingtip positions in ship-local space (see SHIP_VERTS in ship.ts).
+// Wingtip positions in ship-local space (see SHIP_VERTS in shipRender.ts).
 const TIPS = [new THREE.Vector3(-0.65, 0, 0.6), new THREE.Vector3(0.65, 0, 0.6)];
 
-type Ribbon = {
-  line: THREE.Line;
-  positions: Float32Array; // TRAIL_SAMPLES × 3, oldest → newest
-  alphas: Float32Array;    // emission alpha per sample
-  posAttr: THREE.BufferAttribute;
-  alphaAttr: THREE.BufferAttribute;
-};
-
 export type Trails = {
-  update: (ships: Ship[], dt: number) => void;
+  lines: THREE.LineSegments;
+  update: (ships: Ship[]) => void;
 };
 
 function smoothstep(e0: number, e1: number, x: number): number {
@@ -53,7 +49,31 @@ function smoothstep(e0: number, e1: number, x: number): number {
 
 const _tip = new THREE.Vector3();
 
-export function createTrails(scene: THREE.Scene, ships: Ship[]): Trails {
+export function createTrails(scene: THREE.Scene): Trails {
+  const ribbons = SHIP_MAX * TIPS.length;
+  const n = TRAIL_SAMPLES;
+  const vertCount = ribbons * n;
+  const positions = new Float32Array(vertCount * 3);
+  const alphas = new Float32Array(vertCount);   // uploaded: emission × age fade
+  const emitted = new Float32Array(vertCount);  // emission alpha per sample
+  // Static index: consecutive samples of each ribbon form its segments.
+  const index = new Uint32Array(ribbons * (n - 1) * 2);
+  let w = 0;
+  for (let r = 0; r < ribbons; r++) {
+    for (let k = 0; k < n - 1; k++) {
+      index[w++] = r * n + k;
+      index[w++] = r * n + k + 1;
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  const posAttr = new THREE.BufferAttribute(positions, 3);
+  const alphaAttr = new THREE.BufferAttribute(alphas, 1);
+  posAttr.setUsage(THREE.DynamicDrawUsage);
+  alphaAttr.setUsage(THREE.DynamicDrawUsage);
+  geometry.setAttribute('position', posAttr);
+  geometry.setAttribute('aAlpha', alphaAttr);
+  geometry.setIndex(new THREE.BufferAttribute(index, 1));
+
   const material = new THREE.ShaderMaterial({
     uniforms: { uColor: { value: new THREE.Color(0.72, 0.88, 1.0) } },
     vertexShader: VERT,
@@ -62,88 +82,81 @@ export function createTrails(scene: THREE.Scene, ships: Ship[]): Trails {
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   });
+  const lines = new THREE.LineSegments(geometry, material);
+  lines.frustumCulled = false;
+  scene.add(lines);
 
-  const ribbons: Ribbon[][] = ships.map(() =>
-    TIPS.map(() => {
-      const positions = new Float32Array(TRAIL_SAMPLES * 3);
-      const alphas = new Float32Array(TRAIL_SAMPLES);
-      const geometry = new THREE.BufferGeometry();
-      const posAttr = new THREE.BufferAttribute(positions, 3);
-      posAttr.setUsage(THREE.DynamicDrawUsage);
-      const alphaAttr = new THREE.BufferAttribute(alphas, 1);
-      alphaAttr.setUsage(THREE.DynamicDrawUsage);
-      geometry.setAttribute('position', posAttr);
-      geometry.setAttribute('aAlpha', alphaAttr);
-      const line = new THREE.Line(geometry, material);
-      line.frustumCulled = false; // bounds change every frame; not worth recomputing
-      line.visible = false;
-      scene.add(line);
-      return { line, positions, alphas, posAttr, alphaAttr };
-    }),
-  );
+  // Age fade per sample (newest = 1, oldest = 0), eased so the tail thins.
+  const ageFade = new Float32Array(n);
+  for (let k = 0; k < n; k++) { const a = k / (n - 1); ageFade[k] = a * a; }
 
-  const update = (list: Ship[], dt: number): void => {
-    // Age fade per sample: newest = 1, oldest = 0, eased so the tail thins.
-    const n = TRAIL_SAMPLES;
-    for (let i = 0; i < list.length; i++) {
-      const ship = list[i];
-      const pair = ribbons[i];
-      if (ship.phase === 'dormant') {
-        for (const rb of pair) {
-          if (rb.line.visible) {
-            rb.alphas.fill(0);
-            rb.line.visible = false;
-          }
-        }
-        continue;
-      }
-      const vapour = smoothstep(TRAIL_LOAD_ON, TRAIL_LOAD_FULL, ship.load) * ship.fade * TRAIL_ALPHA;
+  const update = (ships: Ship[]): void => {
+    let any = false;
+    for (let i = 0; i < ships.length; i++) {
+      const ship = ships[i];
+      const dormant = ship.phase === 'dormant';
+      const vapour = dormant
+        ? 0
+        : smoothstep(TRAIL_LOAD_ON, TRAIL_LOAD_FULL, ship.load) * ship.fade * TRAIL_ALPHA;
       for (let t = 0; t < TIPS.length; t++) {
-        const rb = pair[t];
-        const pos = rb.positions;
-        const al = rb.alphas;
+        const base = (i * TIPS.length + t) * n;
+        const b3 = base * 3;
         // Shift history back one sample, advecting every stored point with
         // the landscape.
+        let live = false;
         for (let k = 0; k < n - 1; k++) {
-          pos[k * 3] = pos[(k + 1) * 3];
-          pos[k * 3 + 1] = pos[(k + 1) * 3 + 1];
-          pos[k * 3 + 2] = pos[(k + 1) * 3 + 2] - TERRAIN_ROW_SPACING;
-          al[k] = al[k + 1];
+          const o = b3 + k * 3;
+          positions[o] = positions[o + 3];
+          positions[o + 1] = positions[o + 4];
+          positions[o + 2] = positions[o + 5] - TERRAIN_ROW_SPACING;
+          const e = emitted[base + k + 1];
+          emitted[base + k] = e;
+          if (e > 0.002) live = true;
+        }
+        const last3 = b3 + (n - 1) * 3;
+        if (dormant) {
+          emitted[base + n - 1] = 0;
+          if (live) {
+            for (let k = 0; k < n; k++) alphas[base + k] = emitted[base + k] * ageFade[k];
+            any = true;
+          } else {
+            alphas.fill(0, base, base + n);
+          }
+          continue;
         }
         // Newest sample: the wingtip now.
         _tip.copy(TIPS[t]).applyQuaternion(ship.group.quaternion).add(ship.group.position);
-        const last = (n - 1) * 3;
         // A teleport (arrival staging) would draw a streak across the sky —
         // restart the ribbon at the new spot instead.
-        const jump = Math.abs(_tip.z - (pos[last + 2] + TERRAIN_ROW_SPACING)) > 8
-          || Math.abs(_tip.x - pos[last]) > 8;
+        const jump = Math.abs(_tip.z - (positions[last3 + 2] + TERRAIN_ROW_SPACING)) > 8
+          || Math.abs(_tip.x - positions[last3]) > 8;
         if (jump) {
           for (let k = 0; k < n; k++) {
-            pos[k * 3] = _tip.x; pos[k * 3 + 1] = _tip.y; pos[k * 3 + 2] = _tip.z;
-            al[k] = 0;
+            const o = b3 + k * 3;
+            positions[o] = _tip.x; positions[o + 1] = _tip.y; positions[o + 2] = _tip.z;
+            emitted[base + k] = 0;
           }
+          live = false;
         }
-        pos[last] = _tip.x;
-        pos[last + 1] = _tip.y;
-        pos[last + 2] = _tip.z;
-        al[n - 1] = vapour;
-        // Visible only if anything in the ribbon still carries vapour.
-        let any = false;
-        for (let k = 0; k < n; k++) if (al[k] > 0.002) { any = true; break; }
-        rb.line.visible = any;
-        if (!any) continue;
-        // Bake age fade into the uploaded alpha.
-        const arr = rb.alphaAttr.array as Float32Array;
-        for (let k = 0; k < n; k++) {
-          const age = k / (n - 1);
-          arr[k] = al[k] * age * age;
+        positions[last3] = _tip.x;
+        positions[last3 + 1] = _tip.y;
+        positions[last3 + 2] = _tip.z;
+        emitted[base + n - 1] = vapour;
+        if (vapour > 0.002) live = true;
+        if (live) {
+          for (let k = 0; k < n; k++) alphas[base + k] = emitted[base + k] * ageFade[k];
+          any = true;
+        } else {
+          alphas.fill(0, base, base + n);
         }
-        rb.posAttr.needsUpdate = true;
-        rb.alphaAttr.needsUpdate = true;
       }
     }
-    void dt;
+    lines.visible = any;
+    if (any) {
+      posAttr.needsUpdate = true;
+      alphaAttr.needsUpdate = true;
+    }
   };
 
-  return { update };
+  return { lines, update };
 }

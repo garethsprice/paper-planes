@@ -7,8 +7,10 @@
 import {
   SHIP_MAX, SHIP_X_BOUND, SHIP_Z_MIN, SHIP_Y_MAX,
   FLOCK_ENERGY_RISE_S, FLOCK_ENERGY_FALL_S, FLOCK_MAX_MEMORY_S,
+  FLOCK_E_LO, FLOCK_E_HI, FLOCK_EXPONENT,
   FLOCK_JOIN_HOLD_S, FLOCK_LEAVE_HOLD_S,
-  FLOCK_JOIN_INTERVAL_S, FLOCK_LEAVE_INTERVAL_S, FLOCK_JOIN_DIST,
+  FLOCK_JOIN_INTERVAL_S, FLOCK_JOIN_INTERVAL_FAST_S,
+  FLOCK_LEAVE_INTERVAL_S, FLOCK_LEAVE_INTERVAL_FAST_S, FLOCK_JOIN_DIST,
 } from '../constants.ts';
 import type { Ship } from './ship.ts';
 
@@ -96,7 +98,9 @@ export function updateFlock(flock: Flock, ships: Ship[], input: FlockInput): voi
   const norm = Math.min(1, raw / flock.runMax);
   const tau = norm > flock.energy ? FLOCK_ENERGY_RISE_S : FLOCK_ENERGY_FALL_S;
   flock.energy += (norm - flock.energy) * (1 - Math.exp(-dt / tau));
-  flock.desired = 1 + Math.round(smoothstep(0.35, 0.95, flock.energy) * (SHIP_MAX - 1));
+  // Exponential: most of the range flies a handful, the top fills the sky.
+  const u = smoothstep(FLOCK_E_LO, FLOCK_E_HI, flock.energy);
+  flock.desired = 1 + Math.round(Math.pow(u, FLOCK_EXPONENT) * (SHIP_MAX - 1));
 
   // ----- census -----
   let present = 0;
@@ -115,9 +119,17 @@ export function updateFlock(flock: Flock, ships: Ship[], input: FlockInput): voi
     flock.belowFor = 0;
   }
 
+  // Pacing follows the gap: one plane arrives or leaves at leisure, a gap
+  // of six or more moves fast.
+  const gapT = (gap: number) => Math.min(1, Math.max(0, (gap - 1) / 5));
+  const joinInterval = FLOCK_JOIN_INTERVAL_S
+    + (FLOCK_JOIN_INTERVAL_FAST_S - FLOCK_JOIN_INTERVAL_S) * gapT(flock.desired - present);
+  const leaveInterval = FLOCK_LEAVE_INTERVAL_S
+    + (FLOCK_LEAVE_INTERVAL_FAST_S - FLOCK_LEAVE_INTERVAL_S) * gapT(present - flock.desired);
+
   if (
     flock.aboveFor > FLOCK_JOIN_HOLD_S &&
-    time - flock.lastJoinAt > FLOCK_JOIN_INTERVAL_S
+    time - flock.lastJoinAt > joinInterval
   ) {
     // Lowest-index dormant ship arrives, so present ships stay a prefix.
     const ship = ships.find((s) => s.phase === 'dormant');
@@ -128,7 +140,7 @@ export function updateFlock(flock: Flock, ships: Ship[], input: FlockInput): voi
     }
   } else if (
     flock.belowFor > FLOCK_LEAVE_HOLD_S &&
-    time - flock.lastLeaveAt > FLOCK_LEAVE_INTERVAL_S
+    time - flock.lastLeaveAt > leaveInterval
   ) {
     // Highest-index present ship peels away; ship 0 never leaves.
     for (let i = ships.length - 1; i >= 1; i--) {

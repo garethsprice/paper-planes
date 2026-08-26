@@ -12,8 +12,8 @@ Since I was a kid I've watched something like this in my head whenever I've list
 
 - **Live spectrogram** — `AnalyserNode` (`fftSize: 1024`, `smoothing: 0.8`) drives a 129×129 wireframe grid scrolling in -Z.
 - **Audio sources** — file drop / pick, microphone, or a tab via `getDisplayMedia` (Chrome/Edge).
-- **A flock that breathes with the music** — one paper plane in quiet passages, up to `SHIP_MAX` (12) at full intensity. Musical energy is the mean spectrum level normalised against a ~90 s running peak, so it self-calibrates to any source; arrivals surge in from the dark behind the flock, departures throttle back, bank outward and fade as the landscape carries them away. The leader never leaves.
-- **Autopilot ships** — paper wedges with frosted panels and a glowing edge. They fly in the *landscape's* reference frame: the spectrogram streams past at one grid row per frame, the planes are carried with it, and they hold station by flying into the flow at airspeed ≈ ground speed. Every motion is a physical consequence — bank gives a coordinated turn (ω = g·tan φ / v) and lateral drift, pitch gives climb/dive (dives speed up, climbs bleed), throttle surges the flock forward on bass and lets it fall back in quiet, and acceleration pitches the nose: a plane drops its nose to gain speed and flares as it sheds it. Altitude rides a slow terrain *envelope* — rising quickly onto loud passages, sinking gently after. Wander targets come from simplex noise + spectral centroid.
+- **A flock that breathes with the music** — one paper plane in quiet passages, a handful through a verse, and — exponentially, only at the top of the energy range — up to `SHIP_MAX` (28) at the peak of the song, arriving in a rush when the gap is large and ebbing away slowly. Musical energy is the mean spectrum level normalised against a ~90 s running peak, so it self-calibrates to any source; arrivals surge in from the dark behind the flock, departures throttle back, bank outward and fade as the landscape carries them away. The leader never leaves.
+- **Autopilot ships** — paper wedges with frosted panels and a glowing edge, drawn as two instanced draw calls for the whole flock (edges and panels) plus one for all wingtip vapour, with a neighbour-separation term so a dense flock keeps its spacing. They fly in the *landscape's* reference frame: the spectrogram streams past at one grid row per frame, the planes are carried with it, and they hold station by flying into the flow at airspeed ≈ ground speed. Every motion is a physical consequence — bank gives a coordinated turn (ω = g·tan φ / v) and lateral drift, pitch gives climb/dive (dives speed up, climbs bleed), throttle surges the flock forward on bass and lets it fall back in quiet, and acceleration pitches the nose: a plane drops its nose to gain speed and flares as it sheds it. Altitude rides a slow terrain *envelope* — rising quickly onto loud passages, sinking gently after. Wander targets come from simplex noise + spectral centroid.
 - **BPM detection** — [`realtime-bpm-analyzer`](https://github.com/dlepaux/realtime-bpm-analyzer) feeds a live readout and a per-beat dot indicator. A 200 Hz biquad lowpass focuses peak detection on the kick band; mic input gets a 8× gain stage so quiet rooms still lock.
 - **Beat reactivity** — ships get a thrust kick on every detected peak; the whole landscape breathes vertically; the camera bass-pushes in; the cool→hot gradient drifts in hue.
 - **11 cameras** — five cinematic presets (eye-level, 3/4 high-side, low-left, overhead reverse, high crane), three chase cameras (one per ship), three FPV cockpit cameras (own ship hidden). There are no cuts: every shot change is a crane-style glide (≈3 s, 1.8 s on a drop) from wherever the camera is into the new mode's live pose. Presets drift gently while held; chase is a damped tether that tilts with the ship's bank. A music-driven director holds shots for 16–48 beats and moves on drops, builds and quiet onsets — never sooner than ~14 s into a shot. Press `C` to advance manually, `V` to toggle the director.
@@ -88,10 +88,11 @@ src/
 │
 ├── scene/
 │   ├── core.ts        scene, fog, master camera, shared uniforms
-│   ├── terrain.ts     line-grid spectrogram + shaders + bilerpHeight
+│   ├── terrain.ts     line-grid spectrogram + shaders + bilerpHeight + coarse envelope
 │   ├── stars.ts       full-sphere star field
 │   ├── nebula.ts      spherical particle nebula
-│   ├── ship.ts        Ship type, kinematic flight model, formation
+│   ├── ship.ts        Ship type, kinematic flight model, formation, separation
+│   ├── shipRender.ts  instanced edges + lit panels for the whole flock
 │   ├── flock.ts       music-energy → flock size; arrivals and departures
 │   ├── mood.ts        anticipation / flash / afterglow / hush scalars
 │   ├── trails.ts      wingtip vapour ribbons under load
