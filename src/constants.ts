@@ -220,6 +220,12 @@ export const SHOT_MIN_CADENCE_MS = 18000; // beat-cadence cuts wait at least thi
 export const BUILD_CUT_REFRACTORY_MS = 20000;
 export const SHOT_FALLBACK_MS = 28000;    // no BPM lock → cut this often
 
+// ----- visual rhyme (see camera/rhyme.ts) -----
+export const RHYME_FEATURE_S = 3.0;        // fingerprint smoothing (s)
+export const RHYME_MATCH_DIST = 0.14;      // max distance (4-D, 0..1 axes) to count as the same section
+export const RHYME_MIN_AGE_S = 45;         // a memory must be at least this old to be recalled
+export const RHYME_MAX_MEMORIES = 24;
+
 // ----- pilot override -----
 // Arrow-key presses in chase/cockpit extend the current shot by this much,
 // preventing the music director from cutting away mid-flight.

@@ -38,6 +38,7 @@ import {
 } from './camera/modes.ts';
 import { createOrbit, attachOrbitInput, updateOrbitPhysics } from './camera/orbit.ts';
 import { createDirector, runDirector, bumpPilotControl } from './camera/director.ts';
+import { createRhyme, updateRhyme } from './camera/rhyme.ts';
 import { updateCamera, createCameraRig } from './camera/update.ts';
 
 const { canvas, fileInput, playBtn, micBtn, tabBtn, stereoBtn, uiEl, statusEl, bpmNumEl, bpmDotEl, dbgEl } = dom;
@@ -194,6 +195,7 @@ canvas.addEventListener('click', () => {
 const cameraSel = createCameraSelection(3);
 const cameraRig = createCameraRig();
 const director = createDirector();
+const rhyme = createRhyme();
 
 // ----- keyboard shortcuts + UI auto-hide tracking -----
 installKeyHandlers({
@@ -383,11 +385,16 @@ function animate() {
 
   // Music-driven cinematic director — synchronises cuts to drops, builds,
   // quiet sections, and beat cadence. 'V' toggles, 'C' jumps regardless.
+  // Visual rhyme: keep the music fingerprint current, then let the director
+  // recall a shot if this section has played before.
+  updateRhyme(rhyme, { energy: flock.energy, bassEnergy, centroid, intensity: I }, dt);
   runDirector(director, cameraSel, {
     dynamics,
     dropFiredThisFrame,
     beatCount: bpmHandle.beatCount,
     bpm: bpmHandle.bpm,
+    time: t,
+    rhyme,
   });
 
   // restore visibility every frame; the active cockpit mode hides its own ship.
@@ -475,7 +482,7 @@ function animate() {
   // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
   bpmHandle.beatPulse *= Math.exp(-9 * dt); // visible for ~150ms after each peak
   updateBpmReadout({ uiEl, bpmNumEl, bpmDotEl, dbgEl }, bpmHandle);
-  updateDebugPanel(dbgEl, dynamics, formation, dropBoost, flock, mood);
+  updateDebugPanel(dbgEl, dynamics, formation, dropBoost, flock, mood, t - rhyme.lastRecallAt < 4);
 
   renderFrame(pipeline, scene, camera, dt);
 }

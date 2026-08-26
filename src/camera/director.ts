@@ -14,6 +14,8 @@ import {
 import type { Dynamics } from '../audio/dynamics.ts';
 import type { CameraSelection } from './modes.ts';
 import { applyCut, pickCinematicMode, isModeAvailable } from './modes.ts';
+import { rhymeRecall, rhymeRemember, type Rhyme, type RhymeKind } from './rhyme.ts';
+import type { ModeRole } from './modes.ts';
 
 export type Director = {
   cinematicAuto: boolean;
@@ -51,7 +53,28 @@ export type DirectorContext = {
   dropFiredThisFrame: boolean;
   beatCount: number;
   bpm: number;
+  /** Scene time (s) and the rhyme memory, for shot recall. */
+  time: number;
+  rhyme: Rhyme;
 };
+
+/** Choose a shot for an event: a remembered one if this section has been
+ *  seen before, otherwise a fresh pick from the role pool, which is then
+ *  remembered. Returns the chosen mode index. */
+function chooseShot(
+  sel: CameraSelection,
+  ctx: DirectorContext,
+  kind: RhymeKind,
+  role: ModeRole,
+  preferred: number = -1,
+): number {
+  const usable = (idx: number) => idx !== sel.currentIdx && isModeAvailable(sel, idx);
+  const recalled = rhymeRecall(ctx.rhyme, kind, ctx.time, usable);
+  if (recalled >= 0) return recalled;
+  const idx = preferred >= 0 && usable(preferred) ? preferred : pickCinematicMode(sel, role);
+  rhymeRemember(ctx.rhyme, kind, idx, ctx.time);
+  return idx;
+}
 
 /**
  * Run one director tick. May call applyCut to swap the camera mode and the
@@ -81,22 +104,20 @@ export function runDirector(
 
   if (ctx.dropFiredThisFrame && shotAgeMs > SHOT_MIN_EVENT_MS) {
     // A drop earns the one quick move we allow — still a glide, not a cut.
-    applyCut(sel, pickCinematicMode(sel, 'dramatic'), ctx.beatCount, CAM_BLEND_DROP_S);
+    applyCut(sel, chooseShot(sel, ctx, 'drop', 'dramatic'), ctx.beatCount, CAM_BLEND_DROP_S);
   } else if (
     buildOnset &&
     now - director.lastBuildCutAt > BUILD_CUT_REFRACTORY_MS &&
     shotAgeMs > SHOT_MIN_EVENT_MS
   ) {
-    applyCut(sel, pickCinematicMode(sel, 'rush'), ctx.beatCount);
+    applyCut(sel, chooseShot(sel, ctx, 'build', 'rush'), ctx.beatCount);
     director.lastBuildCutAt = now;
   } else if (quietOnset && shotAgeMs > SHOT_MIN_EVENT_MS) {
     // Quiet: more often than not, settle behind the lone leader (chase
     // ship 1 = mode 5) as the world goes dark around it.
     const chaseLeader = 5;
-    const target = isModeAvailable(sel, chaseLeader) && Math.random() < 0.65
-      ? chaseLeader
-      : pickCinematicMode(sel, 'calm');
-    applyCut(sel, target, ctx.beatCount);
+    const preferred = Math.random() < 0.65 ? chaseLeader : -1;
+    applyCut(sel, chooseShot(sel, ctx, 'quiet', 'calm', preferred), ctx.beatCount);
     director.nextCutMinBeats = ctx.beatCount + 64;
   } else {
     // Beat cadence — long holds. Intensity narrows the interval but never
@@ -115,7 +136,7 @@ export function runDirector(
     const timeReady = shotAgeMs >= fallbackMs;
     if (beatReady || timeReady) {
       const role = I > 0.3 ? 'active' : 'calm';
-      applyCut(sel, pickCinematicMode(sel, role), ctx.beatCount);
+      applyCut(sel, chooseShot(sel, ctx, 'cadence', role), ctx.beatCount);
     }
   }
 

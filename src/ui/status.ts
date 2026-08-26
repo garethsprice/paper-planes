@@ -63,6 +63,7 @@ export function updateDebugPanel(
   dropBoost: number,
   flock: { present: number; desired: number; energy: number },
   mood: { anticipation: number; hush: number; afterglow: number },
+  rhymed: boolean,
 ): void {
   if ((dbgFrameCounter++ % 6) !== 0) return;
   dbgEl.innerHTML =
@@ -75,6 +76,7 @@ export function updateDebugPanel(
     (mood.anticipation > 0.05 ? `<span class="num"> · A ${mood.anticipation.toFixed(2)}</span>` : '') +
     (mood.hush > 0.05 ? `<span class="num"> · H ${mood.hush.toFixed(2)}</span>` : '') +
     (mood.afterglow > 0.05 ? '<span class="tag drop"> RELEASE</span>' : '') +
+    (rhymed ? '<span class="tag on"> RHYME</span>' : '') +
     `<span class="num"> · B ${dynamics.build.toFixed(2)}</span>` +
     (dynamics.quiet ? '<span class="tag on"> QUIET</span>' : '') +
     (dropBoost > 0.05
