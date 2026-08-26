@@ -4,6 +4,7 @@ import {
   TERRAIN_ROW_BLEND, TERRAIN_SWELL, TERRAIN_BREATH_ATTACK, TERRAIN_BREATH_RELEASE, TERRAIN_BREATH_AMP,
   MOOD_FOG_BUILD, MOOD_DIM_HUSH, MOOD_FOV_AFTERGLOW, MOOD_SCATTER_X,
   MOUNTAIN_PARALLAX, MOUNTAIN_PARALLAX_ENERGY,
+  SPARK_BEAT_BASE, SPARK_BEAT_PER_I, SPARK_DROP_BURST,
   SUN_AZIMUTH_X, SUN_AZIMUTH_Z, SUN_ELEV_MIN_DEG, SUN_ELEV_MAX_DEG, SUN_ARC_S,
   SUN_INTENSITY_MIN, SUN_HUSH_DIM,
 } from './constants.ts';
@@ -22,6 +23,7 @@ import { createStars } from './scene/stars.ts';
 import { createNebula } from './scene/nebula.ts';
 import { createShips, updateShip, scatterShip, applyShipLighting } from './scene/ship.ts';
 import { createSky } from './scene/sky.ts';
+import { createSparks } from './scene/sparks.ts';
 import { createMood, updateMood } from './scene/mood.ts';
 import { createMountains } from './scene/mountains.ts';
 import { createTrails } from './scene/trails.ts';
@@ -65,6 +67,8 @@ const stars = createStars(scene);
 const nebula = createNebula(scene);
 const mountains = createMountains(scene, terrain.noise3, uniforms);
 const sky = createSky(scene, uniforms);
+const sparks = createSparks(scene, terrain);
+let lastBeatPulse = 0;
 let sunArc = 0.3; // very slow long-term energy: drives the light's elevation and warmth
 const SUN_EMBER = new THREE.Color(0.95, 0.28, 0.08);
 const SUN_GOLD = new THREE.Color(1.0, 0.8, 0.5);
@@ -340,6 +344,21 @@ function animate() {
   const sinceDrop = (performance.now() - dynamics.dropTime) / 1000;
   const dropBoost = sinceDrop < 1.5 ? Math.exp(-sinceDrop * 2.0) : 0;
   const I = dynamics.intensity;
+
+  // Sparks off the crests: a few on every beat, scaled by intensity, a
+  // burst on the drop, none in the hush. Vigour (launch spread and size)
+  // follows intensity so a heavy section throws them higher and wider.
+  sparks.update(t, groundFlow);
+  if (fftBins && !dynamics.quiet) {
+    const beatEdge = bpmHandle.beatPulse > 0.9 && lastBeatPulse < 0.5;
+    const vigour = Math.min(1.5, I);
+    if (beatEdge) {
+      const count = Math.round((SPARK_BEAT_BASE + SPARK_BEAT_PER_I * I) * (1 - mood.hush));
+      sparks.emit(count, t, uniforms.uSunColor.value, vigour);
+    }
+    if (dropFiredThisFrame) sparks.emit(SPARK_DROP_BURST, t, uniforms.uSunColor.value, 1.5);
+  }
+  lastBeatPulse = bpmHandle.beatPulse;
 
   // The drop opens the lens for a couple of seconds — the pull-back reveal.
   const targetFov = 55 + mood.afterglow * MOOD_FOV_AFTERGLOW;

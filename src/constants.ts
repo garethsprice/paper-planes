@@ -70,6 +70,18 @@ export const SHIP_PANEL_OPACITY = 0.58;
 export const SUN_MOUNTAIN_HAZE = 0.85;     // how fully mountain lines take the haze colour against the glow
 export const SUN_MOUNTAIN_RIM = 0.55;      // glow on crests facing the light
 
+// ----- crest sparks (see scene/sparks.ts) -----
+export const SPARK_POOL = 720;
+export const SPARK_LIFE_MIN = 0.8;         // s
+export const SPARK_LIFE_MAX = 1.6;
+export const SPARK_RISE_MIN = 2.5;         // launch speed up (u/s)
+export const SPARK_RISE_MAX = 6.0;
+export const SPARK_GRAVITY = 3.5;          // u/s² — a gentle arc
+export const SPARK_SIZE = 2.2;             // ≈ px at 20 u
+export const SPARK_BEAT_BASE = 1.5;        // sparks per beat at zero intensity…
+export const SPARK_BEAT_PER_I = 5;         // …plus this per unit intensity
+export const SPARK_DROP_BURST = 48;        // extra on a drop
+
 // ----- mountain ring (see scene/mountains.ts) -----
 export const MOUNTAIN_RADII = [66, 72, 78, 84, 90, 97, 104, 112];
 export const MOUNTAIN_SEGMENTS = 160;

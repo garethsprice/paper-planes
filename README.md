@@ -21,6 +21,7 @@ Since I was a kid I've watched something like this in my head whenever I've list
 - **Wingtip vapour** — thin additive ribbons off each wingtip that form only under aerodynamic load (bank g, hard acceleration, the drop dive, an arrival surging in) and fade within a second, carried back into the flow with the landscape.
 - **Visual rhyme** — every shot change is tagged with a fingerprint of the music that led into it (energy, bass, timbre) and the event that caused it; when a later change matches a remembered one, the director returns to that shot, so the second chorus is seen from where the first was. A `rhyme` tag shows in the status strip when it fires.
 - **Horizon light** — a sky dome with a sun disc and a haze gathered on one side. Its elevation follows the song's long-term energy (a glow below the horizon in quiet, risen ~14° at full intensity) and its colour warms from ember to gold — sunrise as crescendo. The same light rim-lights the ships' sun-facing surfaces, shades their frosted panels per face (flat-shaded from screen-space derivatives: hemisphere ambient, wrapped diffuse, and transmission through faces lit from behind, so a plane crossing the glow lights up like a lantern rather than cutting a black shape), washes the far side of the grid, catches the mountain crests and tints the mountain lines with the haze where they cross the glow; the hush dims it and the drop flares the disc.
+- **Crest sparks** — on each beat a few points of light lift off the highest crests (more with intensity, a burst on a drop, none in the hush), arc gently, drift back with the landscape and fade like embers. A GPU pool integrated in the vertex shader.
 - **Mountain ring** — a coarse wireframe range encircling the grid at 66–112 u, peaks breathing with the song's long arc and swelling faintly on the beat, fading ring by ring toward the sky for atmospheric depth. Its height field scrolls through world Z at a fraction of the ground flow (quicker with energy), so near peaks pass while far ones crawl — the parallax of moving through a landscape at scale.
 - **Ethereal post-processing** — restrained UnrealBloomPass at half resolution (high threshold, tight radius — a halo on the brightest crests, never a wash), a whisper of radial chromatic aberration that pulses with bass, and a faint mirror world reflected below the terrain.
 - **Iridescent shimmer** — slow oil-slick hue noise in the fragment shader, BPM-driven hue offset on top, and tiny glints that drift along the crests so the grid glimmers rather than glows.
@@ -95,6 +96,7 @@ src/
 │   ├── mood.ts        anticipation / flash / afterglow / hush scalars
 │   ├── trails.ts      wingtip vapour ribbons under load
 │   ├── sky.ts         sky dome + horizon light
+│   ├── sparks.ts      beat-driven crest sparks (GPU pool)
 │   └── mountains.ts   distant wireframe range for scale
 │
 ├── audio/
