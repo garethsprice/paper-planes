@@ -18,6 +18,10 @@ export type SharedUniforms = {
   uAuroraIntensity: { value: number };
   /** Global terrain brightness (1 = normal); the hush dims it. */
   uDim:             { value: number };
+  /** Horizon light: unit direction toward it, its colour, and 0..1 strength. */
+  uLightDir:        { value: THREE.Vector3 };
+  uSunColor:        { value: THREE.Color };
+  uSun:             { value: number };
 };
 
 export type SceneCore = {
@@ -57,6 +61,9 @@ export function createSceneCore(): SceneCore {
     uAuroraPhase:     { value: 0.0 },
     uAuroraIntensity: { value: 0.0 },
     uDim:             { value: 1.0 },
+    uLightDir:        { value: new THREE.Vector3(-0.3, 0.05, -0.95).normalize() },
+    uSunColor:        { value: new THREE.Color(1.0, 0.6, 0.3) },
+    uSun:             { value: 0.5 },
   };
 
   return { scene, fog, camera, uniforms };

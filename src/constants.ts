@@ -51,6 +51,20 @@ export const TRAIL_LOAD_ON = 0.2;
 export const TRAIL_LOAD_FULL = 0.7;
 export const TRAIL_LOAD_SMOOTH_S = 0.18;
 
+// ----- horizon light (see scene/sky.ts) -----
+export const SKY_RADIUS = 190;             // inside camera.far (200), beyond the stars
+// Azimuth of the light in the XZ plane: behind the grid from the presets'
+// point of view, a little to the left, so a sunrise frames the far peaks.
+export const SUN_AZIMUTH_X = -0.32;
+export const SUN_AZIMUTH_Z = -1.0;
+export const SUN_ELEV_MIN_DEG = -3;        // quiet: a glow below the horizon
+export const SUN_ELEV_MAX_DEG = 14;        // full energy: risen
+export const SUN_ARC_S = 8;                // time constant of the elevation's long arc
+export const SUN_INTENSITY_MIN = 0.35;
+export const SUN_HUSH_DIM = 0.55;          // fraction of light the hush removes
+export const SUN_SHIP_RIM = 0.45;          // how strongly the ships' sun side brightens/warms
+export const SUN_MOUNTAIN_RIM = 0.55;      // glow on crests facing the light
+
 // ----- mountain ring (see scene/mountains.ts) -----
 export const MOUNTAIN_RADII = [66, 72, 78, 84, 90, 97, 104, 112];
 export const MOUNTAIN_SEGMENTS = 160;

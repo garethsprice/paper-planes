@@ -7,16 +7,18 @@
 
 import * as THREE from 'three';
 import type { NoiseFunction3D } from 'simplex-noise';
-import { MOUNTAIN_RADII, MOUNTAIN_SEGMENTS } from '../constants.ts';
+import { MOUNTAIN_RADII, MOUNTAIN_SEGMENTS, SUN_MOUNTAIN_RIM } from '../constants.ts';
 
 const VERT = /* glsl */ `
   attribute float aFade;
   varying float vH;
   varying float vFade;
+  varying vec2 vXZ;
   uniform float uPeak;
   void main() {
     vH = clamp(position.y / uPeak, 0.0, 1.0);
     vFade = aFade;
+    vXZ = position.xz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
@@ -24,16 +26,26 @@ const VERT = /* glsl */ `
 const FRAG = /* glsl */ `
   varying float vH;
   varying float vFade;
+  varying vec2 vXZ;
   uniform vec3 uLow;
   uniform vec3 uHigh;
   uniform vec3 uSky;
   uniform float uLift;
+  uniform vec3 uLightDir;
+  uniform vec3 uSunColor;
+  uniform float uSun;
+  uniform float uRim;
   void main() {
     // Deep indigo at the foot, dusty violet on the crests; farther rings
     // sink toward the sky colour and thin out.
     vec3 col = mix(uLow, uHigh, pow(vH, 1.4));
     col = mix(col, uSky, vFade * 0.75);
-    float alpha = (0.55 - vFade * 0.32) * uLift;
+    // Crests facing the horizon light catch its colour.
+    vec2 lz = normalize(vec2(uLightDir.x, uLightDir.z));
+    float facing = clamp(dot(normalize(vXZ), lz) * 0.5 + 0.5, 0.0, 1.0);
+    float rim = facing * facing * pow(vH, 1.6) * uSun * uRim;
+    col += uSunColor * rim;
+    float alpha = (0.55 - vFade * 0.32) * uLift + rim * 0.3;
     gl_FragColor = vec4(col, alpha);
   }
 `;
@@ -44,7 +56,11 @@ export type Mountains = {
   update: (envelope: number, time: number) => void;
 };
 
-export function createMountains(scene: THREE.Scene, noise3: NoiseFunction3D): Mountains {
+export function createMountains(
+  scene: THREE.Scene,
+  noise3: NoiseFunction3D,
+  shared: { uLightDir: { value: THREE.Vector3 }; uSunColor: { value: THREE.Color }; uSun: { value: number } },
+): Mountains {
   const rings = MOUNTAIN_RADII.length;
   const N = MOUNTAIN_SEGMENTS;
   const count = rings * N;
@@ -80,6 +96,10 @@ export function createMountains(scene: THREE.Scene, noise3: NoiseFunction3D): Mo
       uHigh: { value: new THREE.Color(0x6a5cb4) },
       uSky: { value: new THREE.Color(0x000308) },
       uLift: { value: 1 },
+      uLightDir: shared.uLightDir,
+      uSunColor: shared.uSunColor,
+      uSun: shared.uSun,
+      uRim: { value: SUN_MOUNTAIN_RIM },
     },
     vertexShader: VERT,
     fragmentShader: FRAG,

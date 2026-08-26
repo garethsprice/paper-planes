@@ -44,6 +44,9 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
   uniform float uAuroraIntensity;
   uniform float uDepthHalf;
   uniform float uDim;
+  uniform vec3 uLightDir;
+  uniform vec3 uSunColor;
+  uniform float uSun;
 
   // cool → hot gradient
   vec3 grade(float t) {
@@ -120,6 +123,12 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
       );
       col += auroraColor * auroraBand * uAuroraIntensity * ageFade;
     }
+
+    // horizon light: the side of the grid toward the sun takes a warm wash
+    // that strengthens as the light rises
+    vec2 lz = normalize(vec2(uLightDir.x, uLightDir.z));
+    float facing = clamp(dot(normalize(vWorldXZ + vec2(0.0001)), lz) * 0.5 + 0.5, 0.0, 1.0);
+    col = mix(col, col * (uSunColor * 1.5 + 0.25), 0.3 * facing * facing * uSun);
 
     // hush: the whole grid sinks toward dark, leaving the stars and the
     // lone plane

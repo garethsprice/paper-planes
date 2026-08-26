@@ -35,7 +35,7 @@ import {
   FORMATION_SLOTS, SHIP_MAX,
   FLOCK_JOIN_SURGE, FLOCK_LEAVE_DROP, FLOCK_FADE_S,
   MOOD_FLOCK_TIGHTEN, MOOD_FLOCK_LIFT, MOOD_SCATTER_S, MOOD_DIVE_S, MOOD_DIVE_PITCH,
-  TRAIL_LOAD_SMOOTH_S,
+  TRAIL_LOAD_SMOOTH_S, SUN_SHIP_RIM,
 } from '../constants.ts';
 import { bilerpHeight, type Terrain } from './terrain.ts';
 
@@ -221,6 +221,27 @@ export type ShipUpdateInput = {
   anticipation: number;
   arrowKeys: { left: boolean; right: boolean; up: boolean; down: boolean };
 };
+
+const _up = new THREE.Vector3();
+const SHIP_EDGE_BASE = new THREE.Color(0xeaffff);
+
+/** Rim light from the horizon sun: the wing surface facing the light
+ *  brightens and warms, so a banking plane visibly turns toward or away
+ *  from it. Lines have no normals, so the wing's up vector stands in. */
+export function applyShipLighting(
+  ship: Ship,
+  lightDir: THREE.Vector3,
+  sunColor: THREE.Color,
+  sun: number,
+): void {
+  if (ship.phase === 'dormant') return;
+  _up.set(0, 1, 0).applyQuaternion(ship.group.quaternion);
+  const facing = Math.max(0, _up.dot(lightDir) * 0.5 + 0.5);
+  const k = facing * facing * sun * SUN_SHIP_RIM;
+  const c = ship.edgeMaterial.color;
+  c.copy(SHIP_EDGE_BASE).multiplyScalar(0.85 + k * 0.6);
+  c.lerp(sunColor, k * 0.6);
+}
 
 /** Fire the drop response on a ship: scatter sideways and dive. */
 export function scatterShip(ship: Ship, time: number, lateral: number): void {

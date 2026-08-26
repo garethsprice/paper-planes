@@ -3,6 +3,8 @@ import {
   COLS, ROWS, HEIGHT_SCALE, NOISE_AMP, BLOOM_DIVISOR, TERRAIN_ROW_SPACING, CAM_BLEND_MANUAL_S,
   TERRAIN_ROW_BLEND, TERRAIN_SWELL, TERRAIN_BREATH_ATTACK, TERRAIN_BREATH_RELEASE, TERRAIN_BREATH_AMP,
   MOOD_FOG_BUILD, MOOD_DIM_HUSH, MOOD_FOV_AFTERGLOW, MOOD_SCATTER_X,
+  SUN_AZIMUTH_X, SUN_AZIMUTH_Z, SUN_ELEV_MIN_DEG, SUN_ELEV_MAX_DEG, SUN_ARC_S,
+  SUN_INTENSITY_MIN, SUN_HUSH_DIM,
 } from './constants.ts';
 import { createStereoState } from './render/stereo.ts';
 import { createRenderPipeline, updatePostFx, renderFrame } from './render/pipeline.ts';
@@ -17,7 +19,8 @@ import { createSceneCore } from './scene/core.ts';
 import { createTerrain, sampleLogBin, bilerpHeight } from './scene/terrain.ts';
 import { createStars } from './scene/stars.ts';
 import { createNebula } from './scene/nebula.ts';
-import { createShips, updateShip, scatterShip } from './scene/ship.ts';
+import { createShips, updateShip, scatterShip, applyShipLighting } from './scene/ship.ts';
+import { createSky } from './scene/sky.ts';
 import { createMood, updateMood } from './scene/mood.ts';
 import { createMountains } from './scene/mountains.ts';
 import { createTrails } from './scene/trails.ts';
@@ -58,7 +61,11 @@ const terrain = createTerrain(sceneCore);
 const { posAttr, heights, noise3, binMap, mirrorMaterial } = terrain;
 const stars = createStars(scene);
 const nebula = createNebula(scene);
-const mountains = createMountains(scene, terrain.noise3);
+const mountains = createMountains(scene, terrain.noise3, uniforms);
+const sky = createSky(scene, uniforms);
+let sunArc = 0.3; // very slow long-term energy: drives the light's elevation and warmth
+const SUN_EMBER = new THREE.Color(0.95, 0.28, 0.08);
+const SUN_GOLD = new THREE.Color(1.0, 0.8, 0.5);
 const mood = createMood();
 let mountainEnvelope = 0.5; // slow-smoothed flock energy that raises the range
 const FOG_NEAR_BASE = sceneCore.fog.near;
@@ -419,6 +426,23 @@ function animate() {
   sceneCore.fog.near = uniforms.uFogNear.value = FOG_NEAR_BASE * fogScale;
   sceneCore.fog.far = uniforms.uFogFar.value = FOG_FAR_BASE * fogScale;
   uniforms.uDim.value = 1 - MOOD_DIM_HUSH * mood.hush;
+  // Horizon light: rises and warms with the song's long arc — a sunrise as
+  // crescendo — dims in the hush, and flares with the drop.
+  sunArc += (flock.energy - sunArc) * (1 - Math.exp(-dt / SUN_ARC_S));
+  const elev = (SUN_ELEV_MIN_DEG + (SUN_ELEV_MAX_DEG - SUN_ELEV_MIN_DEG) * sunArc) * Math.PI / 180;
+  const azLen = Math.hypot(SUN_AZIMUTH_X, SUN_AZIMUTH_Z);
+  uniforms.uLightDir.value.set(
+    (SUN_AZIMUTH_X / azLen) * Math.cos(elev),
+    Math.sin(elev),
+    (SUN_AZIMUTH_Z / azLen) * Math.cos(elev),
+  );
+  uniforms.uSunColor.value.copy(SUN_EMBER).lerp(SUN_GOLD, sunArc);
+  uniforms.uSun.value = (SUN_INTENSITY_MIN + (1 - SUN_INTENSITY_MIN) * sunArc) * (1 - SUN_HUSH_DIM * mood.hush);
+  sky.material.uniforms.uFlash.value = mood.flash;
+  // The dome rides with the camera so it is never clipped by the far plane
+  // and every fragment's direction is exact.
+  sky.mesh.position.copy(camera.position);
+  for (const ship of ships) applyShipLighting(ship, uniforms.uLightDir.value, uniforms.uSunColor.value, uniforms.uSun.value);
   // Distant range breathes with the song's long arc and dims with the hush.
   mountainEnvelope += (flock.energy - mountainEnvelope) * (1 - Math.exp(-dt / 4));
   mountains.update(mountainEnvelope, t);
