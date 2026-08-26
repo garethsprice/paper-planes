@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import {
-  COLS, ROWS, HEIGHT_SCALE, NOISE_AMP, BLOOM_DIVISOR, TERRAIN_ROW_SPACING, CAM_BLEND_MANUAL_S,
-  TERRAIN_ROW_BLEND, TERRAIN_SWELL, TERRAIN_BREATH_ATTACK, TERRAIN_BREATH_RELEASE, TERRAIN_BREATH_AMP,
+  COLS, ROWS, BLOOM_DIVISOR, TERRAIN_ROW_SPACING, CAM_BLEND_MANUAL_S,
+  TERRAIN_BREATH_ATTACK, TERRAIN_BREATH_RELEASE, TERRAIN_BREATH_AMP,
   MOOD_FOG_BUILD, MOOD_DIM_HUSH, MOOD_FOV_AFTERGLOW, MOOD_SCATTER_X,
   MOUNTAIN_PARALLAX, MOUNTAIN_PARALLAX_ENERGY,
   SPARK_BEAT_BASE, SPARK_BEAT_PER_I, SPARK_DROP_BURST,
@@ -18,7 +18,7 @@ import {
 import { dom } from './ui/dom.ts';
 import { createFrame } from './frame.ts';
 import { createSceneCore } from './scene/core.ts';
-import { createTerrain, sampleLogBin, bilerpHeight, updateEnvelope } from './scene/terrain.ts';
+import { createTerrain, bilerpHeight, updateEnvelope } from './scene/terrain.ts';
 import { createStars } from './scene/stars.ts';
 import { createNebula } from './scene/nebula.ts';
 import { createShips, updateShip, scatterShip, separateShips } from './scene/ship.ts';
@@ -28,6 +28,7 @@ import { createSparks } from './scene/sparks.ts';
 import { createMood, updateMood } from './scene/mood.ts';
 import { createMountains } from './scene/mountains.ts';
 import { createTrails } from './scene/trails.ts';
+import { createLandscape, writeLandscapeRow } from './scene/landscape.ts';
 import { createFlock, updateFlock } from './scene/flock.ts';
 import {
   ensureAudio, getAudio, attachStream, loadAudioFile,
@@ -63,12 +64,13 @@ const { renderer } = pipeline;
 
 // ----- terrain (line-grid spectrogram) + mirror reflection + scene props -----
 const terrain = createTerrain(sceneCore);
-const { posAttr, heights, noise3, binMap, mirrorMaterial } = terrain;
+const { posAttr, heights, mirrorMaterial } = terrain;
 const stars = createStars(scene);
 const nebula = createNebula(scene);
 const mountains = createMountains(scene, terrain.noise3, uniforms);
 const sky = createSky(scene, uniforms);
 const sparks = createSparks(scene, terrain);
+const landscape = createLandscape();
 let lastBeatPulse = 0;
 let sunArc = 0.3; // very slow long-term energy: drives the light's elevation and warmth
 const SUN_EMBER = new THREE.Color(0.95, 0.28, 0.08);
@@ -261,7 +263,6 @@ function onDrop(time: number) {
 const clock = new THREE.Clock();
 let groundFlow = TERRAIN_ROW_SPACING * 60; // u/s, refined per frame from dt
 const ROW_STRIDE_FRONT = (ROWS - 1) * COLS; // newest row offset in heights[]
-const rowScratch = new Float32Array(COLS);   // raw FFT row before shaping
 let breath = 0;                               // smoothed beat envelope, 0..1
 
 function animate() {
@@ -296,33 +297,11 @@ function animate() {
     decayDynamics(dynamics);
   }
 
-  // Front-row write — log-scaled FFT amplitude, shaped into ridges rather
-  // than spikes: a 3-tap blur across columns rounds the peaks, a blend with
-  // the previous row (now one step back after the shift) lets a transient
-  // rise over a few frames instead of appearing fully formed, and a slow
-  // broad swell rolls underneath so the floor undulates with the music.
-  const baseIdx = ROW_STRIDE_FRONT;
-  const prevRow = baseIdx - COLS;
-  if (fftBins) {
-    for (let ix = 0; ix < COLS; ix++) {
-      rowScratch[ix] = Math.pow(sampleLogBin(fftBins, binMap[ix]) / 255, 0.85);
-    }
-    for (let ix = 0; ix < COLS; ix++) {
-      const l = rowScratch[Math.max(0, ix - 1)];
-      const r = rowScratch[Math.min(COLS - 1, ix + 1)];
-      const shaped = (l + 2 * rowScratch[ix] + r) * 0.25;
-      const n = noise3(ix * 0.08, t * 0.35, 0) * NOISE_AMP;
-      const swell = (noise3(ix * 0.018, t * 0.12, 7) * 0.5 + 0.5) * TERRAIN_SWELL * dynamics.intensity;
-      const target = shaped * HEIGHT_SCALE + n + swell;
-      heights[baseIdx + ix] =
-        heights[prevRow + ix] + (target - heights[prevRow + ix]) * TERRAIN_ROW_BLEND;
-    }
-  } else {
-    for (let ix = 0; ix < COLS; ix++) {
-      const n = (noise3(ix * 0.08, t * 0.25, 0) * 0.5 + 0.5) * NOISE_AMP * 4;
-      heights[baseIdx + ix] = n;
-    }
-  }
+  // Front-row write — see scene/landscape.ts: folded spectrogram blended
+  // with a band-driven synthesised landscape over a slow geology, meandering.
+  writeLandscapeRow(landscape, terrain, heights, ROW_STRIDE_FRONT, ROW_STRIDE_FRONT - COLS, {
+    fftBins, dt, time: t, intensity: dynamics.intensity, centroid,
+  });
 
   // copy heights → position attribute Y
   const pa = posAttr.array as Float32Array;

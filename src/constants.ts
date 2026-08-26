@@ -12,6 +12,23 @@ export const NOISE_AMP = 0.18;
 // the amplitude (u) of the slow rolling ground swell at full intensity.
 export const TERRAIN_ROW_BLEND = 0.55;
 export const TERRAIN_SWELL = 0.9;
+// Landscape synthesis (see scene/landscape.ts).
+export const TERRAIN_SPECTRUM_MIX = 0.45;  // 1 = folded spectrogram only, 0 = synthesised landscape only
+// Spatial wavelength (u) of the noise layer each band drives: bass → broad
+// swells, mids → ridges, highs → fine texture.
+export const TERRAIN_BAND_WAVELENGTHS: [number, number, number] = [34, 11, 3.4];
+export const TERRAIN_BAND_GAINS: [number, number, number] = [1.0, 1.0, 0.4];
+export const TERRAIN_BAND_MAX_MEMORY_S = 60; // self-calibration memory per band
+// Geology: per-column base elevation that rises under loud passages and
+// erodes through quiet ones — the land the song has built.
+export const TERRAIN_GEO_WEIGHT = 0.5;      // fraction of the landscape height that accumulates
+export const TERRAIN_GEO_RISE_S = 6;
+export const TERRAIN_GEO_FALL_S = 25;
+// Meander: the spine wanders with slow noise plus the spectral centroid.
+export const TERRAIN_MEANDER_AMP = 8;        // u
+export const TERRAIN_MEANDER_WAVELENGTH = 120; // u of travel per noise unit
+export const TERRAIN_CENTROID_MEANDER = 5;   // u at the extremes of centroid
+
 // Beat breath envelope (1/s attack and release) and amplitude (fraction of
 // height at full intensity). ~70 ms attack, ~350 ms release.
 export const TERRAIN_BREATH_ATTACK = 14;
