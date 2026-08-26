@@ -72,7 +72,7 @@ const FOG_NEAR_BASE = sceneCore.fog.near;
 const FOG_FAR_BASE = sceneCore.fog.far;
 
 // ----- ships + formation flight (factories live in src/scene/ship.ts) -----
-const shipsHandle = createShips(scene);
+const shipsHandle = createShips(scene, uniforms);
 const ships = shipsHandle.list;
 const formation = shipsHandle.formation;
 const flock = createFlock();
@@ -442,7 +442,9 @@ function animate() {
   // The dome rides with the camera so it is never clipped by the far plane
   // and every fragment's direction is exact.
   sky.mesh.position.copy(camera.position);
-  for (const ship of ships) applyShipLighting(ship, uniforms.uLightDir.value, uniforms.uSunColor.value, uniforms.uSun.value);
+  for (const ship of ships) {
+    applyShipLighting(ship, uniforms.uLightDir.value, uniforms.uSunColor.value, uniforms.uSun.value);
+  }
   // Distant range breathes with the song's long arc and dims with the hush.
   mountainEnvelope += (flock.energy - mountainEnvelope) * (1 - Math.exp(-dt / 4));
   mountains.update(mountainEnvelope, t);

@@ -7,18 +7,20 @@
 
 import * as THREE from 'three';
 import type { NoiseFunction3D } from 'simplex-noise';
-import { MOUNTAIN_RADII, MOUNTAIN_SEGMENTS, SUN_MOUNTAIN_RIM } from '../constants.ts';
+import { MOUNTAIN_RADII, MOUNTAIN_SEGMENTS, SUN_MOUNTAIN_RIM, SUN_MOUNTAIN_HAZE } from '../constants.ts';
 
 const VERT = /* glsl */ `
   attribute float aFade;
   varying float vH;
   varying float vFade;
   varying vec2 vXZ;
+  varying vec3 vViewDir;
   uniform float uPeak;
   void main() {
     vH = clamp(position.y / uPeak, 0.0, 1.0);
     vFade = aFade;
     vXZ = position.xz;
+    vViewDir = position - cameraPosition;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
@@ -27,6 +29,7 @@ const FRAG = /* glsl */ `
   varying float vH;
   varying float vFade;
   varying vec2 vXZ;
+  varying vec3 vViewDir;
   uniform vec3 uLow;
   uniform vec3 uHigh;
   uniform vec3 uSky;
@@ -35,6 +38,7 @@ const FRAG = /* glsl */ `
   uniform vec3 uSunColor;
   uniform float uSun;
   uniform float uRim;
+  uniform float uHaze;
   void main() {
     // Deep indigo at the foot, dusty violet on the crests; farther rings
     // sink toward the sky colour and thin out.
@@ -45,6 +49,16 @@ const FRAG = /* glsl */ `
     float facing = clamp(dot(normalize(vXZ), lz) * 0.5 + 0.5, 0.0, 1.0);
     float rim = facing * facing * pow(vH, 1.6) * uSun * uRim;
     col += uSunColor * rim;
+    // Aerial perspective against the glow: where the line of sight crosses
+    // the horizon haze, the line takes the haze's colour instead of cutting
+    // a dark shape out of it. Same band/gather as the sky shader.
+    vec3 d = normalize(vViewDir);
+    float band = exp(-max(d.y, 0.0) * 11.0) * smoothstep(-0.25, 0.0, d.y);
+    vec2 daz = normalize(vec2(d.x, d.z) + vec2(1e-5, 0.0));
+    float gather = pow(max(0.0, dot(daz, lz)), 3.0);
+    float corona = pow(max(dot(d, uLightDir), 0.0), 18.0);
+    float haze = clamp((band * gather * 0.9 + corona) * uSun, 0.0, 1.0) * uHaze;
+    col = mix(col, uSunColor, haze);
     float alpha = (0.55 - vFade * 0.32) * uLift + rim * 0.3;
     gl_FragColor = vec4(col, alpha);
   }
@@ -92,7 +106,7 @@ export function createMountains(
   const material = new THREE.ShaderMaterial({
     uniforms: {
       uPeak: { value: 40 },
-      uLow: { value: new THREE.Color(0x070a1e) },
+      uLow: { value: new THREE.Color(0x0d1230) },
       uHigh: { value: new THREE.Color(0x6a5cb4) },
       uSky: { value: new THREE.Color(0x000308) },
       uLift: { value: 1 },
@@ -100,6 +114,7 @@ export function createMountains(
       uSunColor: shared.uSunColor,
       uSun: shared.uSun,
       uRim: { value: SUN_MOUNTAIN_RIM },
+      uHaze: { value: SUN_MOUNTAIN_HAZE },
     },
     vertexShader: VERT,
     fragmentShader: FRAG,

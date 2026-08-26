@@ -63,6 +63,11 @@ export const SUN_ARC_S = 8;                // time constant of the elevation's l
 export const SUN_INTENSITY_MIN = 0.35;
 export const SUN_HUSH_DIM = 0.55;          // fraction of light the hush removes
 export const SUN_SHIP_RIM = 0.45;          // how strongly the ships' sun side brightens/warms
+// Ship panels: frosted paper. Lighter and more translucent than a solid
+// body so the sun shows through rather than being cut out.
+export const SHIP_PANEL_COLOR = 0x141c40;
+export const SHIP_PANEL_OPACITY = 0.58;
+export const SUN_MOUNTAIN_HAZE = 0.85;     // how fully mountain lines take the haze colour against the glow
 export const SUN_MOUNTAIN_RIM = 0.55;      // glow on crests facing the light
 
 // ----- mountain ring (see scene/mountains.ts) -----

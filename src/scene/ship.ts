@@ -35,7 +35,7 @@ import {
   FORMATION_SLOTS, SHIP_MAX,
   FLOCK_JOIN_SURGE, FLOCK_LEAVE_DROP, FLOCK_FADE_S,
   MOOD_FLOCK_TIGHTEN, MOOD_FLOCK_LIFT, MOOD_SCATTER_S, MOOD_DIVE_S, MOOD_DIVE_PITCH,
-  TRAIL_LOAD_SMOOTH_S, SUN_SHIP_RIM,
+  TRAIL_LOAD_SMOOTH_S, SUN_SHIP_RIM, SHIP_PANEL_COLOR, SHIP_PANEL_OPACITY,
 } from '../constants.ts';
 import { bilerpHeight, type Terrain } from './terrain.ts';
 
@@ -52,7 +52,7 @@ export type Ship = {
   /** Which way (±X) a leaving ship peels away. */
   leaveSide: number;
   edgeMaterial: THREE.LineBasicMaterial;
-  panelMaterial: THREE.MeshBasicMaterial;
+  panelMaterial: THREE.ShaderMaterial;
   /** Yaw (rad). Body-forward is local −Z, so heading π flies into the flow (+Z). */
   heading: number;
   /** Flight-path angle (rad), positive = climbing. */
@@ -119,10 +119,74 @@ function buildShipGeometry(): THREE.BufferGeometry {
   return geom;
 }
 
-/** Translucent paper panels filling the wedge. Their only job is
- *  legibility: a bare wireframe plane vanishes against the bright grid
- *  behind it, whereas a dim, slightly see-through body occludes the lines
- *  and gives the eye a silhouette — like frosted paper against neon. */
+// Panel shader — thin frosted paper lit by the horizon sun. The face normal
+// comes from screen-space derivatives of the world position (flat shading
+// without touching the shared 5-vertex geometry), flipped to face the viewer
+// because a sheet has two sides. Lighting is:
+//   ambient   — hemisphere: top surfaces lighter than the keel, so the wedge
+//               has form even with the sun below the horizon;
+//   diffuse   — wrapped Lambert (light bleeds round the terminator as it
+//               does on paper);
+//   transmit  — light striking the far side shows through, strongest when
+//               the sun sits behind the sheet from the viewer's eye, so a
+//               plane crossing the glow lights up like a lantern.
+const PANEL_VERT = /* glsl */ `
+  varying vec3 vWorldPos;
+  void main() {
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorldPos = wp.xyz;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+const PANEL_FRAG = /* glsl */ `
+  varying vec3 vWorldPos;
+  uniform vec3 uLightDir;
+  uniform vec3 uSunColor;
+  uniform float uSun;
+  uniform vec3 uBase;
+  uniform float uOpacity;
+  void main() {
+    vec3 n = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
+    vec3 v = normalize(cameraPosition - vWorldPos);
+    if (dot(n, v) < 0.0) n = -n;
+    float ndl = dot(n, uLightDir);
+    float hemi = 0.7 + 0.6 * (n.y * 0.5 + 0.5);
+    float wrap = clamp(ndl * 0.6 + 0.4, 0.0, 1.0);
+    float transmit = clamp(-ndl, 0.0, 1.0);
+    float backlit = pow(max(dot(-v, uLightDir), 0.0), 8.0);
+    vec3 col = uBase * hemi
+      + uSunColor * uSun * (wrap * 0.3 + transmit * (0.1 + backlit * 0.6));
+    float alpha = uOpacity * (1.0 - backlit * uSun * 0.35);
+    gl_FragColor = vec4(col, alpha);
+  }
+`;
+
+export type LightUniforms = {
+  uLightDir: { value: THREE.Vector3 };
+  uSunColor: { value: THREE.Color };
+  uSun: { value: number };
+};
+
+function createPanelMaterial(light: LightUniforms, opacity: number): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uLightDir: light.uLightDir,
+      uSunColor: light.uSunColor,
+      uSun: light.uSun,
+      uBase: { value: new THREE.Color(SHIP_PANEL_COLOR) },
+      uOpacity: { value: opacity },
+    },
+    vertexShader: PANEL_VERT,
+    fragmentShader: PANEL_FRAG,
+    transparent: true,
+    side: THREE.DoubleSide,
+  });
+}
+
+/** Translucent paper panels filling the wedge. Legibility first: a bare
+ *  wireframe plane vanishes against the bright grid behind it, whereas a
+ *  frosted body occludes the lines and gives the eye a silhouette — and
+ *  once lit (see the panel shader) it gives the wedge form. */
 function buildShipPanels(): THREE.BufferGeometry {
   const geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.BufferAttribute(SHIP_VERTS, 3));
@@ -138,25 +202,20 @@ function makeShip(
   scene: THREE.Scene,
   geom: THREE.BufferGeometry,
   panelGeom: THREE.BufferGeometry,
+  light: LightUniforms,
   seed: number,
   x0: number,
   z0: number,
   present: boolean,
 ): Ship {
   // Materials are per ship so each can fade independently. Edges: glowing
-  // near-white. Panels: deep blue-black, mostly opaque, depthWrite on so
-  // grid lines behind the body are hidden rather than blended through;
+  // near-white. Panels: lit frosted paper (see PANEL_FRAG), depthWrite on
+  // so grid lines behind the body are hidden rather than blended through;
   // added first so the outline always draws on top.
   const edgeMaterial = new THREE.LineBasicMaterial({
     color: 0xeaffff, fog: false, transparent: true, opacity: present ? 1 : 0,
   });
-  const panelMaterial = new THREE.MeshBasicMaterial({
-    color: 0x0b1024,
-    transparent: true,
-    opacity: present ? 0.82 : 0,
-    side: THREE.DoubleSide,
-    fog: false,
-  });
+  const panelMaterial = createPanelMaterial(light, present ? SHIP_PANEL_OPACITY : 0);
   const group = new THREE.Group();
   group.add(new THREE.Mesh(panelGeom, panelMaterial));
   group.add(new THREE.LineSegments(geom, edgeMaterial));
@@ -188,11 +247,11 @@ function makeShip(
 
 /** All SHIP_MAX ships are created up front; only the leader starts present.
  *  The flock controller (scene/flock.ts) wakes and retires the rest. */
-export function createShips(scene: THREE.Scene): Ships {
+export function createShips(scene: THREE.Scene, light: LightUniforms): Ships {
   const geometry = buildShipGeometry();
   const panelGeometry = buildShipPanels();
   const list = Array.from({ length: SHIP_MAX }, (_, i) =>
-    makeShip(scene, geometry, panelGeometry, 13.7 + i * 53.6, 0, SHIP_Z_CENTER, i === 0),
+    makeShip(scene, geometry, panelGeometry, light, 13.7 + i * 53.6, 0, SHIP_Z_CENTER, i === 0),
   );
   const formation: Formation = {
     active: false, startedAt: 0, endsAt: 0, blendIn: 0, blendOut: 0,
@@ -225,9 +284,10 @@ export type ShipUpdateInput = {
 const _up = new THREE.Vector3();
 const SHIP_EDGE_BASE = new THREE.Color(0xeaffff);
 
-/** Rim light from the horizon sun: the wing surface facing the light
- *  brightens and warms, so a banking plane visibly turns toward or away
- *  from it. Lines have no normals, so the wing's up vector stands in. */
+/** Edge lighting from the horizon sun: the wing surface facing the light
+ *  brightens and warms, so a banking plane's outline visibly turns toward
+ *  or away from it (lines have no normals, so the wing's up vector stands
+ *  in). The panels light themselves per face in their shader. */
 export function applyShipLighting(
   ship: Ship,
   lightDir: THREE.Vector3,
@@ -472,7 +532,7 @@ export function updateShip(
     }
   }
   ship.edgeMaterial.opacity = ship.fade;
-  ship.panelMaterial.opacity = 0.82 * ship.fade;
+  ship.panelMaterial.uniforms.uOpacity.value = SHIP_PANEL_OPACITY * ship.fade;
 
   // ----- mesh attitude -----
   // The nose rides a few degrees above the flight path (angle of attack),
