@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>paper planes · audio-reactive spectrogram</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@1,300&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
@@ -18,6 +21,8 @@
       <button id="tab" class="btn">use tab audio</button>
       <button id="stereo" class="btn" title="side-by-side stereo for AR glasses">3d</button>
       <button id="vr" class="btn" title="enter VR (Quest browser / WebXR)" style="display:none">enter vr</button>
+      <button id="lyrics" class="btn" title="lyric banners from the mic (L)">lyrics</button>
+      <button id="debug" class="btn" title="lyrics debug: live feed + sliders">debug</button>
       <span id="status">click anywhere to start mic</span>
       <span id="bpm">
         <span class="dot" id="bpm-dot"></span>

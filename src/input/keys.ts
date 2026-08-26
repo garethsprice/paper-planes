@@ -12,6 +12,7 @@ export type KeyCallbacks = {
   toggleNebula: () => void;
   toggleCinematic: () => void;
   toggleStereo: () => void;
+  toggleLyrics: () => void;
   nudgeEyeSep: (delta: number) => void;
   cycleCamera: () => void;
   resetBpm: () => void;
@@ -29,6 +30,7 @@ export function installKeyHandlers(cb: KeyCallbacks): void {
       case 'f':         cb.toggleFullscreen(); break;
       case 'r':         cb.resetBpm(); break;
       case 'n':         cb.toggleNebula(); break;
+      case 'l':         cb.toggleLyrics(); break;
       case 'c':         cb.cycleCamera(); break;
       case 'v':         cb.toggleCinematic(); break;
       case '3':         cb.toggleStereo(); break;

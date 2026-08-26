@@ -10,6 +10,8 @@ export const dom = {
   tabBtn:   document.getElementById('tab')     as HTMLButtonElement,
   stereoBtn: document.getElementById('stereo') as HTMLButtonElement,
   vrBtn:    document.getElementById('vr')      as HTMLButtonElement | null,
+  lyricsBtn: document.getElementById('lyrics') as HTMLButtonElement,
+  debugBtn: document.getElementById('debug')   as HTMLButtonElement,
   uiEl:     document.getElementById('ui')      as HTMLDivElement,
   statusEl: document.getElementById('status')  as HTMLSpanElement,
   bpmNumEl: document.querySelector('#bpm .num') as HTMLSpanElement,

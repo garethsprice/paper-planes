@@ -29,6 +29,10 @@ import { createMood, updateMood } from './scene/mood.ts';
 import { createMountains } from './scene/mountains.ts';
 import { createTrails } from './scene/trails.ts';
 import { createLandscape, writeLandscapeRow } from './scene/landscape.ts';
+import { createLyrics } from './audio/lyrics.ts';
+import { createBanner } from './ui/banner.ts';
+import { createDebugPanel } from './ui/debugPanel.ts';
+import { lyricsSettings } from './audio/lyrics.ts';
 import { createFlock, updateFlock } from './scene/flock.ts';
 import {
   ensureAudio, getAudio, attachStream, loadAudioFile,
@@ -46,7 +50,7 @@ import { createDirector, runDirector, bumpPilotControl } from './camera/director
 import { createRhyme, updateRhyme } from './camera/rhyme.ts';
 import { updateCamera, createCameraRig } from './camera/update.ts';
 
-const { canvas, fileInput, playBtn, micBtn, tabBtn, stereoBtn, uiEl, statusEl, bpmNumEl, bpmDotEl, dbgEl } = dom;
+const { canvas, fileInput, playBtn, micBtn, tabBtn, stereoBtn, uiEl, statusEl, bpmNumEl, bpmDotEl, dbgEl, lyricsBtn, debugBtn } = dom;
 
 // ----- three.js core (scene, fog, camera, shared uniform pool) -----
 const sceneCore = createSceneCore();
@@ -71,7 +75,61 @@ const mountains = createMountains(scene, terrain.noise3, uniforms);
 const sky = createSky(scene, uniforms);
 const sparks = createSparks(scene, terrain);
 const landscape = createLandscape();
+
+// ----- lyrics: words from the mic, shown only at frisson moments -----
+// Accepted phrases wait in `pendingLyric`; a drop, a peaking build or a
+// rhyme recall releases the freshest one to the sky. If a phrase arrives
+// while the scene is already in such a moment it shows at once.
+const banner = createBanner();
+let sceneTime = 0; // mirrors the loop's `t` for handlers outside it
+let pendingLyric: { text: string; at: number } | null = null;
+let lastBannerAt = -Infinity;
+function inFrissonWindow(): boolean {
+  return mood.afterglow > 0.25 || mood.anticipation > 0.55 || sceneTime - rhyme.lastRecallAt < 3;
+}
+let lyricNote = '';
+/** Show the pending phrase if a moment allows (or `force` on an event). A
+ *  phrase that has waited fallbackS with the music still up shows anyway —
+ *  moments are preferred, not required. */
+function tryShowLyric(force: boolean): void {
+  if (!pendingLyric) { lyricNote = ''; return; }
+  const age = sceneTime - pendingLyric.at;
+  if (age > lyricsSettings.freshS) { pendingLyric = null; lyricNote = 'last phrase expired unshown'; return; }
+  const sinceBanner = sceneTime - lastBannerAt;
+  if (sinceBanner < lyricsSettings.minIntervalS) {
+    lyricNote = `pending "${pendingLyric.text}" · gap ${(lyricsSettings.minIntervalS - sinceBanner).toFixed(0)}s`;
+    return;
+  }
+  const fallback = age >= lyricsSettings.fallbackS && flock.energy >= lyricsSettings.fallbackEnergy && mood.hush < 0.5;
+  if (!force && !inFrissonWindow() && !fallback) {
+    lyricNote = `pending "${pendingLyric.text}" · waiting for a moment (${(lyricsSettings.fallbackS - age).toFixed(0)}s, energy ${flock.energy.toFixed(2)})`;
+    return;
+  }
+  banner.show(pendingLyric.text);
+  lastBannerAt = sceneTime;
+  lyricNote = `shown "${pendingLyric.text}"`;
+  pendingLyric = null;
+}
+const lyrics = createLyrics((text) => {
+  pendingLyric = { text, at: sceneTime };
+  tryShowLyric(false);
+});
+const debugPanel = createDebugPanel((text) => banner.show(text));
+function setLyricsEnabled(on: boolean): void {
+  if (!lyrics.supported) { statusEl.textContent = 'lyrics: speech recognition unavailable'; return; }
+  lyrics.enabled = on;
+  if (on) lyrics.start(); else lyrics.stop();
+  lyricsBtn.classList.toggle('on', on);
+  lyricsBtn.textContent = on ? 'lyrics on' : 'lyrics off';
+  statusEl.textContent = `lyrics ${on ? 'on' : 'off'}`;
+}
+lyricsBtn.classList.toggle('on', lyrics.enabled && lyrics.supported);
+lyricsBtn.textContent = lyrics.supported ? 'lyrics on' : 'lyrics n/a';
+lyricsBtn.addEventListener('click', () => setLyricsEnabled(!lyrics.enabled));
+debugBtn.addEventListener('click', () => debugPanel.toggle());
 let lastBeatPulse = 0;
+let lastAnticipation = 0;
+let lastHush = 0;
 let sunArc = 0.3; // very slow long-term energy: drives the light's elevation and warmth
 const SUN_EMBER = new THREE.Color(0.95, 0.28, 0.08);
 const SUN_GOLD = new THREE.Color(1.0, 0.8, 0.5);
@@ -157,6 +215,7 @@ micBtn.addEventListener('click', async () => {
     ensureBpm(bpmHandle, a.ctx);
     playBtn.disabled = true;
     statusEl.textContent = 'mic live';
+    if (lyrics.enabled) lyrics.start();
   } catch (e) {
     statusEl.textContent = `mic blocked: ${(e as Error).message}`;
   }
@@ -234,6 +293,7 @@ installKeyHandlers({
     statusEl.textContent = `cinematic ${director.cinematicAuto ? 'on' : 'off'}`;
   },
   toggleStereo: () => setStereo(!stereo.enabled),
+  toggleLyrics: () => setLyricsEnabled(!lyrics.enabled),
   nudgeEyeSep: (delta) => {
     stereo.camera.eyeSep = Math.max(0.05, Math.min(2.0, stereo.camera.eyeSep + delta));
     statusEl.textContent = `eyeSep ${stereo.camera.eyeSep.toFixed(2)}`;
@@ -272,6 +332,7 @@ function animate() {
   if (document.hidden && !renderer.xr.isPresenting) return;
   const dt = clock.getDelta();
   const t = clock.getElapsedTime();
+  sceneTime = t;
   uniforms.uTime.value = t;
 
   // shift heights[] rows toward iy=0 (away from camera).
@@ -340,6 +401,14 @@ function animate() {
     if (dropFiredThisFrame) sparks.emit(SPARK_DROP_BURST, t, uniforms.uSunColor.value, 1.5);
   }
   lastBeatPulse = bpmHandle.beatPulse;
+
+  // A drop, a peaking build, or the light returning after a hush releases a
+  // waiting lyric to the sky; otherwise the fallback timer decides.
+  const lightReturns = mood.hush < 0.5 && lastHush >= 0.5;
+  if (dropFiredThisFrame || (mood.anticipation > 0.55 && lastAnticipation <= 0.55) || lightReturns) tryShowLyric(true);
+  else tryShowLyric(false);
+  lastAnticipation = mood.anticipation;
+  lastHush = mood.hush;
 
   // The drop opens the lens for a couple of seconds — the pull-back reveal.
   const targetFov = 55 + mood.afterglow * MOOD_FOV_AFTERGLOW;
@@ -488,6 +557,7 @@ function animate() {
   bpmHandle.beatPulse *= Math.exp(-9 * dt); // visible for ~150ms after each peak
   updateBpmReadout({ uiEl, bpmNumEl, bpmDotEl, dbgEl }, bpmHandle);
   updateDebugPanel(dbgEl, dynamics, formation, dropBoost, flock, mood, t - rhyme.lastRecallAt < 4);
+  debugPanel.update(lyrics, lyricNote);
 
   renderFrame(pipeline, scene, camera, dt);
 }
