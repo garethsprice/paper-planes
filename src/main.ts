@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import {
-  COLS, ROWS, BLOOM_DIVISOR, TERRAIN_ROW_SPACING, CAM_BLEND_MANUAL_S,
+  COLS, ROWS, BLOOM_DIVISOR, TERRAIN_ROW_SPACING, TERRAIN_ROW_RATE, CAM_BLEND_MANUAL_S,
   TERRAIN_BREATH_ATTACK, TERRAIN_BREATH_RELEASE, TERRAIN_BREATH_AMP,
   MOOD_FOG_BUILD, MOOD_DIM_HUSH, MOOD_FOV_AFTERGLOW, MOOD_SCATTER_X,
   MOUNTAIN_PARALLAX, MOUNTAIN_PARALLAX_ENERGY,
@@ -10,6 +10,7 @@ import {
 } from './constants.ts';
 import { createStereoState } from './render/stereo.ts';
 import { createRenderPipeline, updatePostFx, renderFrame } from './render/pipeline.ts';
+import { measureRefreshRate, createRateCalibrator } from './render/refreshRate.ts';
 import { installXr } from './xr/session.ts';
 import { arrowKeys, installKeyHandlers } from './input/keys.ts';
 import {
@@ -18,10 +19,10 @@ import {
 import { dom } from './ui/dom.ts';
 import { createFrame } from './frame.ts';
 import { createSceneCore } from './scene/core.ts';
-import { createTerrain, bilerpHeight, updateEnvelope } from './scene/terrain.ts';
+import { createTerrain, bilerpHeight, updateEnvelope, setFlowOffset } from './scene/terrain.ts';
 import { createStars } from './scene/stars.ts';
 import { createNebula } from './scene/nebula.ts';
-import { createShips, updateShip, scatterShip, separateShips } from './scene/ship.ts';
+import { createShips, updateShip, scatterShip, separateShips, type ShipUpdateInput } from './scene/ship.ts';
 import { createShipRenderer } from './scene/shipRender.ts';
 import { createSky } from './scene/sky.ts';
 import { createSparks } from './scene/sparks.ts';
@@ -48,7 +49,7 @@ import {
 import { createOrbit, attachOrbitInput, updateOrbitPhysics } from './camera/orbit.ts';
 import { createDirector, runDirector, bumpPilotControl } from './camera/director.ts';
 import { createRhyme, updateRhyme } from './camera/rhyme.ts';
-import { updateCamera, createCameraRig } from './camera/update.ts';
+import { updateCamera, createCameraRig, type CameraUpdateInput } from './camera/update.ts';
 
 const { canvas, fileInput, playBtn, micBtn, tabBtn, stereoBtn, uiEl, statusEl, bpmNumEl, bpmDotEl, dbgEl, lyricsBtn, debugBtn } = dom;
 
@@ -329,22 +330,66 @@ function onDrop(time: number) {
 
 // ----- animation loop -----
 const clock = new THREE.Clock();
-let groundFlow = TERRAIN_ROW_SPACING * 60; // u/s, refined per frame from dt
-const ROW_STRIDE_FRONT = (ROWS - 1) * COLS; // newest row offset in heights[]
+// Ground flow: the landscape streams at `rowRate` rows per second (see
+// TERRAIN_ROW_RATE — fixed, or locked to the display's refresh rate at
+// startup), so the ships' cruise airspeed is a constant and a dropped
+// frame never slows the world. Whole rows shift when `rowAcc` passes 1;
+// the fraction slides the grid between shifts so motion stays continuous.
+let rowRate = TERRAIN_ROW_RATE > 0 ? TERRAIN_ROW_RATE : 60;
+let groundFlow = TERRAIN_ROW_SPACING * rowRate; // u/s
+let rowAcc = 0;
+const rateCalibrator = TERRAIN_ROW_RATE > 0 ? null : createRateCalibrator();
+let rateLocked = TERRAIN_ROW_RATE > 0;
+function lockRowRate(hz: number): void {
+  rowRate = hz;
+  groundFlow = TERRAIN_ROW_SPACING * rowRate;
+  rateLocked = true;
+}
 let breath = 0;                               // smoothed beat envelope, 0..1
+// Smoothed frame timing for the status strip (ms).
+const timing = { cpuMs: 0, frameMs: 0 };
+
+// Per-frame input records, allocated once and rewritten each frame so the
+// loop creates no garbage for the collector to pause on.
+const flockInput: FlockInput = {
+  dt: 0, time: 0, level: 0, bassEnergy: 0, quiet: true, intensity: 0, hasAudio: false,
+};
+const shipInput: ShipUpdateInput = {
+  dt: 0, time: 0, groundFlow, level: 0, centroid: 0.5,
+  bassEnergy: 0, beatPulse: 0, arrowKeys, anticipation: 0,
+};
+const cameraInput: CameraUpdateInput = {
+  bassEnergy: 0, intensity: 0, buildLevel: 0, dt: 0, time: 0, anticipation: 0,
+  terrainHeightAt: (x, z) => bilerpHeight(terrain, x, z),
+};
+const SUN_AZIMUTH_LEN = Math.hypot(SUN_AZIMUTH_X, SUN_AZIMUTH_Z);
 
 function animate() {
   // setAnimationLoop drives this externally — works for both rAF (2D) and
   // the WebXR display vsync. Skip per-frame work when the tab is hidden in
   // 2D mode; in XR the headset always wants frames, so don't skip there.
   if (document.hidden && !renderer.xr.isPresenting) return;
-  const dt = clock.getDelta();
+  const frameStart = performance.now();
+  // Clamp the step so a stall (tab switch, a long GC) advances the world
+  // by at most a tenth of a second instead of flinging everything.
+  const dt = Math.min(clock.getDelta(), 0.1);
   const t = clock.getElapsedTime();
   sceneTime = t;
   uniforms.uTime.value = t;
+  if (!rateLocked && rateCalibrator) {
+    const hz = rateCalibrator.push(dt);
+    if (hz) lockRowRate(hz);
+  }
 
-  // shift heights[] rows toward iy=0 (away from camera).
-  heights.copyWithin(0, COLS, ROWS * COLS);
+  // Advance the flow: shift heights[] toward iy=0 (away from camera) by the
+  // whole rows due this frame; slide the grid by the remaining fraction.
+  rowAcc += dt * rowRate;
+  let shifts = Math.floor(rowAcc);
+  if (shifts > 4) { shifts = 4; rowAcc = 4; }
+  rowAcc -= shifts;
+  if (shifts > 0) heights.copyWithin(0, COLS * shifts, ROWS * COLS);
+  setFlowOffset(terrain, rowAcc);
+  const flowStep = groundFlow * dt; // u the landscape travelled −Z this frame
 
   // Audio: pull a fresh FFT and derive bass / level / centroid into the frame.
   const audioState = getAudio();
@@ -368,9 +413,9 @@ function animate() {
 
   // Front-row write — see scene/landscape.ts: folded spectrogram blended
   // with a band-driven synthesised landscape over a slow geology, meandering.
-  writeLandscapeRow(landscape, terrain, heights, ROW_STRIDE_FRONT, ROW_STRIDE_FRONT - COLS, {
+  writeLandscapeRow(landscape, terrain, heights, {
     fftBins, dt, time: t, intensity: dynamics.intensity, centroid,
-  });
+  }, shifts);
 
   // copy heights → position attribute Y
   const pa = posAttr.array as Float32Array;
@@ -433,16 +478,12 @@ function animate() {
   formation.blendIn += ((formation.active ? 1 : 0) - formation.blendIn) * formationLerp;
   formation.blendOut = formation.blendIn; // single state suffices — blend toward target
 
-  // Ground flow: the landscape advances one grid row per frame, so its
-  // speed depends on the frame rate. Smooth it so a hitch doesn't make the
-  // flock lurch; the ships use it as their cruise airspeed.
-  groundFlow += (TERRAIN_ROW_SPACING / Math.max(dt, 1 / 240) - groundFlow) * (1 - Math.exp(-dt / 0.5));
   // Flock size follows musical energy: arrivals surge in from behind,
   // departures peel away. Ships 0..present-1 are the ones in play.
-  updateFlock(flock, ships, {
-    dt, time: t, level, bassEnergy,
-    quiet: dynamics.quiet, intensity: I, hasAudio: fftBins !== null,
-  });
+  flockInput.dt = dt; flockInput.time = t; flockInput.level = level;
+  flockInput.bassEnergy = bassEnergy; flockInput.quiet = dynamics.quiet;
+  flockInput.intensity = I; flockInput.hasAudio = fftBins !== null;
+  updateFlock(flock, ships, flockInput);
   cameraSel.presentShips = flock.present;
   // If the ship we were chasing has left, glide back to a calm shot.
   const chasedIdx = getTrackedShipIdx(cameraSel);
@@ -451,18 +492,16 @@ function animate() {
   }
   // The piloted ship (chase/cockpit) accepts arrow-key steering.
   const trackedShipIdx = getTrackedShipIdx(cameraSel);
-  const shipInput = {
-    dt, time: t, groundFlow, level, centroid,
-    bassEnergy, beatPulse: bpmHandle.beatPulse, arrowKeys,
-    anticipation: mood.anticipation,
-  };
+  shipInput.dt = dt; shipInput.time = t; shipInput.groundFlow = groundFlow;
+  shipInput.level = level; shipInput.centroid = centroid; shipInput.bassEnergy = bassEnergy;
+  shipInput.beatPulse = bpmHandle.beatPulse; shipInput.anticipation = mood.anticipation;
   // Index order matters: wingmen read the leader's target from this frame.
   updateEnvelope(terrain);
   separateShips(ships);
-  ships.forEach((ship, i) =>
-    updateShip(ship, i, ships, formation, terrain, shipInput, i === trackedShipIdx),
-  );
-  trails.update(ships);
+  for (let i = 0; i < ships.length; i++) {
+    updateShip(ships[i], i, ships, formation, terrain, shipInput, i === trackedShipIdx);
+  }
+  trails.update(ships, flowStep);
 
   // Music-driven cinematic director — synchronises cuts to drops, builds,
   // quiet sections, and beat cadence. 'V' toggles, 'C' jumps regardless.
@@ -483,15 +522,10 @@ function animate() {
 
   // Orbit physics (consumed by preset modes); then dispatch on the active mode.
   updateOrbitPhysics(orbit, bassEnergy, dt);
-  updateCamera(camera, cameraSel, orbit, cameraRig, ships, {
-    bassEnergy,
-    intensity: I,
-    buildLevel: dynamics.build,
-    dt,
-    time: t,
-    anticipation: mood.anticipation,
-    terrainHeightAt: (x, z) => bilerpHeight(terrain, x, z),
-  });
+  cameraInput.bassEnergy = bassEnergy; cameraInput.intensity = I;
+  cameraInput.buildLevel = dynamics.build; cameraInput.dt = dt; cameraInput.time = t;
+  cameraInput.anticipation = mood.anticipation;
+  updateCamera(camera, cameraSel, orbit, cameraRig, ships, cameraInput);
 
   // (sinceDrop and dropBoost computed earlier in this frame, see top of
   // animation loop block above the camera section.)
@@ -518,11 +552,10 @@ function animate() {
   // crescendo — dims in the hush, and flares with the drop.
   sunArc += (flock.energy - sunArc) * (1 - Math.exp(-dt / SUN_ARC_S));
   const elev = (SUN_ELEV_MIN_DEG + (SUN_ELEV_MAX_DEG - SUN_ELEV_MIN_DEG) * sunArc) * Math.PI / 180;
-  const azLen = Math.hypot(SUN_AZIMUTH_X, SUN_AZIMUTH_Z);
   uniforms.uLightDir.value.set(
-    (SUN_AZIMUTH_X / azLen) * Math.cos(elev),
+    (SUN_AZIMUTH_X / SUN_AZIMUTH_LEN) * Math.cos(elev),
     Math.sin(elev),
-    (SUN_AZIMUTH_Z / azLen) * Math.cos(elev),
+    (SUN_AZIMUTH_Z / SUN_AZIMUTH_LEN) * Math.cos(elev),
   );
   uniforms.uSunColor.value.copy(SUN_EMBER).lerp(SUN_GOLD, sunArc);
   uniforms.uSun.value = (SUN_INTENSITY_MIN + (1 - SUN_INTENSITY_MIN) * sunArc) * (1 - SUN_HUSH_DIM * mood.hush);
@@ -540,17 +573,18 @@ function animate() {
   mountains.material.uniforms.uLift.value = 1 - 0.55 * mood.hush;
   // mirror world fades down when the scene is quiet
   mirrorMaterial.uniforms.uOpacity.value = 0.10 * I * (1 - mood.hush);
-  // very subtle star parallax (independent of intensity — the cosmos doesn't pause)
-  stars.rotation.y += 0.0003;
+  // very subtle star parallax (independent of intensity — the cosmos doesn't
+  // pause). Rates are per second (the old per-frame values at 60 fps).
+  stars.rotation.y += 0.018 * dt;
   // nebula swirls a bit faster on bass; intensity scales the speed-up
-  nebula.rotation.y += 0.0008 + bassEnergy * 0.004 * I;
+  nebula.rotation.y += (0.048 + bassEnergy * 0.24 * I) * dt;
   (nebula.material as THREE.PointsMaterial).color.setRGB(
     0.45 + centroid * 0.55,
     0.55 + 0.10 * (1 - centroid),
     0.95 - centroid * 0.30,
   );
 
-  updateUiVisibility(uiEl, interaction);
+  const uiIdle = updateUiVisibility(uiEl, interaction);
   // hue: BPM offset + slow time cycle, attenuated by intensity
   const tempoForHue = bpmHandle.bpm > 0 ? bpmHandle.bpm : 120;
   const bpmHue = Math.max(-0.05, Math.min(0.05, (tempoForHue - 120) / 60 * 0.05));
@@ -563,13 +597,29 @@ function animate() {
 
   // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
   bpmHandle.beatPulse *= Math.exp(-9 * dt); // visible for ~150ms after each peak
-  updateBpmReadout({ uiEl, bpmNumEl, bpmDotEl, dbgEl }, bpmHandle);
-  updateDebugPanel(dbgEl, dynamics, formation, dropBoost, flock, mood, t - rhyme.lastRecallAt < 4);
+  // The strip's readouts are DOM writes; skip them while it is hidden.
+  if (!uiIdle) {
+    updateBpmReadout({ uiEl, bpmNumEl, bpmDotEl, dbgEl }, bpmHandle);
+    updateDebugPanel(dbgEl, dynamics, formation, dropBoost, flock, mood, t - rhyme.lastRecallAt < 4, timing);
+  }
   debugPanel.update(lyrics, lyricNote);
 
   renderFrame(pipeline, scene, camera, dt);
+  timing.cpuMs += (performance.now() - frameStart - timing.cpuMs) * 0.05;
+  timing.frameMs += (dt * 1000 - timing.frameMs) * 0.05;
 }
-renderer.setAnimationLoop(animate);
+// Probe the display rate first (a few hundred ms of raw rAF intervals,
+// before any rendering can skew them), then start. A hidden tab yields
+// nothing; the loop then calibrates from its own first clean frames.
+if (rateLocked) {
+  renderer.setAnimationLoop(animate);
+} else {
+  measureRefreshRate().then((hz) => {
+    if (hz) lockRowRate(hz);
+    clock.getDelta(); // don't count the probe as the first frame's step
+    renderer.setAnimationLoop(animate);
+  });
+}
 
 function setStereo(on: boolean) {
   stereo.enabled = on;

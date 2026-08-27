@@ -7,13 +7,13 @@
 // surging in — and is gone within a second.
 //
 // The air moves with the landscape (the conveyor), so stored points are
-// advected −Z by one grid row per frame exactly as the terrain is. A
+// advected −Z by the flow's travel this frame exactly as the terrain is. A
 // station-keeping plane thus streams its vapour straight back into the
 // flow, which is the physically right picture.
 
 import * as THREE from 'three';
 import {
-  SHIP_MAX, TRAIL_SAMPLES, TRAIL_ALPHA, TRAIL_LOAD_ON, TRAIL_LOAD_FULL, TERRAIN_ROW_SPACING,
+  SHIP_MAX, TRAIL_SAMPLES, TRAIL_ALPHA, TRAIL_LOAD_ON, TRAIL_LOAD_FULL,
 } from '../constants.ts';
 import type { Ship } from './ship.ts';
 
@@ -39,7 +39,8 @@ const TIPS = [new THREE.Vector3(-0.65, 0, 0.6), new THREE.Vector3(0.65, 0, 0.6)]
 
 export type Trails = {
   lines: THREE.LineSegments;
-  update: (ships: Ship[]) => void;
+  /** @param flowStep world units the landscape travelled −Z this frame */
+  update: (ships: Ship[], flowStep: number) => void;
 };
 
 function smoothstep(e0: number, e1: number, x: number): number {
@@ -90,7 +91,7 @@ export function createTrails(scene: THREE.Scene): Trails {
   const ageFade = new Float32Array(n);
   for (let k = 0; k < n; k++) { const a = k / (n - 1); ageFade[k] = a * a; }
 
-  const update = (ships: Ship[]): void => {
+  const update = (ships: Ship[], flowStep: number): void => {
     let any = false;
     for (let i = 0; i < ships.length; i++) {
       const ship = ships[i];
@@ -108,7 +109,7 @@ export function createTrails(scene: THREE.Scene): Trails {
           const o = b3 + k * 3;
           positions[o] = positions[o + 3];
           positions[o + 1] = positions[o + 4];
-          positions[o + 2] = positions[o + 5] - TERRAIN_ROW_SPACING;
+          positions[o + 2] = positions[o + 5] - flowStep;
           const e = emitted[base + k + 1];
           emitted[base + k] = e;
           if (e > 0.002) live = true;
@@ -128,7 +129,7 @@ export function createTrails(scene: THREE.Scene): Trails {
         _tip.copy(TIPS[t]).applyQuaternion(ship.group.quaternion).add(ship.group.position);
         // A teleport (arrival staging) would draw a streak across the sky —
         // restart the ribbon at the new spot instead.
-        const jump = Math.abs(_tip.z - (positions[last3 + 2] + TERRAIN_ROW_SPACING)) > 8
+        const jump = Math.abs(_tip.z - (positions[last3 + 2] + flowStep)) > 8
           || Math.abs(_tip.x - positions[last3]) > 8;
         if (jump) {
           for (let k = 0; k < n; k++) {

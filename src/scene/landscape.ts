@@ -17,7 +17,7 @@
 // TERRAIN_SPECTRUM_MIX dials between the two readings.
 
 import {
-  COLS, WIDTH, HEIGHT_SCALE, NOISE_AMP, TERRAIN_ROW_SPACING,
+  COLS, ROWS, WIDTH, HEIGHT_SCALE, NOISE_AMP, TERRAIN_ROW_SPACING,
   TERRAIN_ROW_BLEND, TERRAIN_SWELL,
   TERRAIN_SPECTRUM_MIX, TERRAIN_BAND_WAVELENGTHS, TERRAIN_BAND_GAINS,
   TERRAIN_BAND_MAX_MEMORY_S, TERRAIN_GEO_WEIGHT, TERRAIN_GEO_RISE_S, TERRAIN_GEO_FALL_S,
@@ -37,6 +37,8 @@ export type Landscape = {
   centroid: number;
   meander: number;
   raw: Float32Array;
+  /** Scratch: this frame's finished row profile. */
+  shaped: Float32Array;
 };
 
 export function createLandscape(): Landscape {
@@ -48,6 +50,7 @@ export function createLandscape(): Landscape {
     centroid: 0.5,
     meander: 0,
     raw: new Float32Array(COLS),
+    shaped: new Float32Array(COLS),
   };
 }
 
@@ -74,24 +77,33 @@ function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-/** Write the front row of `heights` (at `baseIdx`, previous row at `prevRow`). */
+/**
+ * Write this frame's row profile into the front of `heights`. Called once
+ * per frame; `rows` is how many rows the flow advanced (and the caller
+ * shifted) this frame — usually 1, 0 on a display faster than the row rate
+ * (the front row is simply refreshed from the live spectrum), more after a
+ * dropped frame, in which case the same profile fills every new row. The
+ * time-based state (band envelopes, meander, geology) advances by `dt`
+ * exactly once regardless.
+ */
 export function writeLandscapeRow(
   ls: Landscape,
   terrain: Terrain,
   heights: Float32Array,
-  baseIdx: number,
-  prevRow: number,
   input: LandscapeInput,
+  rows: number,
 ): void {
   const { fftBins, dt, time, intensity } = input;
   const { noise3, binMap } = terrain;
-  ls.travel += TERRAIN_ROW_SPACING;
+  ls.travel += TERRAIN_ROW_SPACING * rows;
+  const firstRow = ROWS - Math.max(1, rows);
 
   if (!fftBins) {
     // Idle: a low, slow noise floor.
     for (let ix = 0; ix < COLS; ix++) {
-      heights[baseIdx + ix] = (noise3(ix * 0.08, time * 0.25, 0) * 0.5 + 0.5) * NOISE_AMP * 4;
+      ls.shaped[ix] = (noise3(ix * 0.08, time * 0.25, 0) * 0.5 + 0.5) * NOISE_AMP * 4;
     }
+    for (let iy = firstRow; iy < ROWS; iy++) heights.set(ls.shaped, iy * COLS);
     for (let ix = 0; ix < COLS; ix++) ls.geo[ix] *= 1 - dt / TERRAIN_GEO_FALL_S;
     return;
   }
@@ -149,17 +161,24 @@ export function writeLandscapeRow(
     raw[ix] = mixed * HEIGHT_SCALE + ls.geo[ix];
   }
 
-  // Cross-column blur rounds spikes into ridges; the temporal blend with the
-  // previous row lets a transient rise over a few frames; the slow swell
-  // rolls underneath.
+  // Cross-column blur rounds spikes into ridges; the slow swell rolls
+  // underneath.
+  const shaped = ls.shaped;
   for (let ix = 0; ix < COLS; ix++) {
     const l = raw[Math.max(0, ix - 1)];
     const r = raw[Math.min(COLS - 1, ix + 1)];
-    const shaped = (l + 2 * raw[ix] + r) * 0.25;
     const n = noise3(ix * 0.08, time * 0.35, 0) * NOISE_AMP;
     const swell = (noise3(ix * 0.018, time * 0.12, 7) * 0.5 + 0.5) * TERRAIN_SWELL * intensity;
-    const target = shaped + n + swell;
-    heights[baseIdx + ix] =
-      heights[prevRow + ix] + (target - heights[prevRow + ix]) * TERRAIN_ROW_BLEND;
+    shaped[ix] = (l + 2 * raw[ix] + r) * 0.25 + n + swell;
+  }
+  // The temporal blend with the row behind lets a transient rise over a
+  // few rows rather than stepping up at once.
+  for (let iy = firstRow; iy < ROWS; iy++) {
+    const base = iy * COLS;
+    const prev = base - COLS;
+    for (let ix = 0; ix < COLS; ix++) {
+      const h = heights[prev + ix];
+      heights[base + ix] = h + (shaped[ix] - h) * TERRAIN_ROW_BLEND;
+    }
   }
 }

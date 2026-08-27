@@ -37,23 +37,45 @@ export function installInteractionTracking(): Interaction {
   return interaction;
 }
 
-/** Toggle the UI strip's idle class based on cursor presence + idle time. */
-export function updateUiVisibility(uiEl: HTMLElement, interaction: Interaction): void {
+/** Toggle the UI strip's idle class based on cursor presence + idle time.
+ *  Returns whether the strip is idle (hidden), so per-frame readouts can be
+ *  skipped while nobody can see them. */
+export function updateUiVisibility(uiEl: HTMLElement, interaction: Interaction): boolean {
   const idle = !interaction.pointerInWindow && performance.now() - interaction.lastAt > 3000;
   uiEl.classList.toggle('idle', idle);
+  return idle;
 }
 
-/** Per-frame BPM readout + beat-dot opacity (decays via bpmHandle.beatPulse). */
+let lastDotOpacity = -1;
+let lastBpmText = '';
+
+/** Per-frame BPM readout + beat-dot opacity (decays via bpmHandle.beatPulse).
+ *  Every DOM write here invalidates style/layout for the strip, so only
+ *  write what has actually changed: the dot's opacity is quantised to
+ *  1/100 (it decays to rest within a few frames of each beat) and the text
+ *  is compared before it is replaced. */
 export function updateBpmReadout(deps: StatusDeps, bpm: BpmHandle): void {
-  deps.bpmDotEl.style.opacity = String(0.2 + bpm.beatPulse * 0.8);
-  deps.bpmNumEl.textContent = bpm.bpm > 0
+  const opacity = Math.round((0.2 + bpm.beatPulse * 0.8) * 100) / 100;
+  if (opacity !== lastDotOpacity) {
+    lastDotOpacity = opacity;
+    deps.bpmDotEl.style.opacity = String(opacity);
+  }
+  const text = bpm.bpm > 0
     ? `${Math.round(bpm.bpm)} bpm`
     : bpm.bpmCandidate > 0
       ? `~${Math.round(bpm.bpmCandidate)} bpm`
       : '— bpm';
+  if (text !== lastBpmText) {
+    lastBpmText = text;
+    deps.bpmNumEl.textContent = text;
+  }
 }
 
 let dbgFrameCounter = 0;
+
+/** Smoothed frame timing for the strip: `cpuMs` is main-thread time inside
+ *  the animation callback, `frameMs` the interval between frames. */
+export type FrameTiming = { cpuMs: number; frameMs: number };
 
 /** Throttled (every 6 frames ≈ 10 Hz) debug-panel rebuild. */
 export function updateDebugPanel(
@@ -64,6 +86,7 @@ export function updateDebugPanel(
   flock: { present: number; desired: number; energy: number },
   mood: { anticipation: number; hush: number; afterglow: number },
   rhymed: boolean,
+  timing: FrameTiming,
 ): void {
   if ((dbgFrameCounter++ % 6) !== 0) return;
   dbgEl.innerHTML =
@@ -83,5 +106,6 @@ export function updateDebugPanel(
       ? `<span class="tag drop"> DROP×${dynamics.dropCount}</span>`
       : ` <span style="opacity:0.5">drp ${dynamics.dropCount}</span>`) +
     (formation.active ? '<span class="tag on"> FORM</span>' : '') +
-    (dynamics.build > 0.3 ? '<span class="tag on"> BUILD</span>' : '');
+    (dynamics.build > 0.3 ? '<span class="tag on"> BUILD</span>' : '') +
+    `<span class="num"> · ${timing.cpuMs.toFixed(1)}/${timing.frameMs.toFixed(1)} ms</span>`;
 }

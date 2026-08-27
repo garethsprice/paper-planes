@@ -110,7 +110,7 @@ export function createSparks(scene: THREE.Scene, terrain: Terrain): Sparks {
       if (h > bestH) {
         bestH = h;
         bx = (ix / (COLS - 1) - 0.5) * WIDTH;
-        bz = (iy / (ROWS - 1) - 0.5) * DEPTH;
+        bz = (iy / (ROWS - 1) - 0.5) * DEPTH + terrain.zOffset;
       }
     }
     if (bestH < HEIGHT_SCALE * 0.22) return false; // nothing worth calling a crest

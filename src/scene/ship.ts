@@ -1,10 +1,10 @@
 // Kinematic coordinated-flight model in the landscape's reference frame.
 //
-// The spectrogram streams toward −Z one grid row per frame, so the ground is
-// a conveyor. A plane's velocity over that ground must equal its airspeed
+// The spectrogram streams toward −Z at the ground flow speed, so the ground
+// is a conveyor. A plane's velocity over that ground must equal its airspeed
 // vector — so each frame a ship moves along its nose by speed·dt *and* is
-// carried −Z by exactly one row. To hold station it flies into the flow (+Z)
-// at airspeed ≈ flow; it cannot circle (it would be swept away) and every
+// carried −Z by flow·dt. To hold station it flies into the flow (+Z) at
+// airspeed ≈ flow; it cannot circle (it would be swept away) and every
 // visible motion is the physical consequence of bank, pitch and throttle:
 //   bank → coordinated turn (ω = g·tan φ / v) → heading deviates → lateral drift
 //   pitch → climb/dive along the path (dives speed up, climbs bleed speed)
@@ -37,7 +37,6 @@ import {
   SHIP_ACCEL_TO_PITCH, SHIP_DECEL_TO_PITCH, SHIP_ACCEL_TO_NOSE, SHIP_DECEL_TO_NOSE,
   SHIP_NOSE_OFFSET_MIN, SHIP_NOSE_OFFSET_MAX, SHIP_TURN_AOA, SHIP_ACCEL_SMOOTH_S,
   SHIP_SEP_RADIUS, SHIP_SEP_STRENGTH, SHIP_SEP_MAX,
-  TERRAIN_ROW_SPACING,
   FORMATION_SLOTS, SHIP_MAX,
   FLOCK_JOIN_SURGE, FLOCK_LEAVE_DROP, FLOCK_FADE_S,
   MOOD_FLOCK_TIGHTEN, MOOD_FLOCK_LIFT, MOOD_SCATTER_S, MOOD_DIVE_S, MOOD_DIVE_PITCH,
@@ -402,13 +401,13 @@ export function updateShip(
   // Coordinated turn: bank → turn rate. Positive roll = left bank = heading
   // increases (body-forward −Z rotates toward −X).
   ship.heading = wrapAngle(ship.heading + turnRate * dt);
-  // Nose motion plus advection: the landscape carries the plane −Z by one
-  // grid row per frame, exactly as it carries the terrain.
+  // Nose motion plus advection: the landscape carries the plane −Z at the
+  // ground flow speed, exactly as it carries the terrain.
   const cosP = Math.cos(ship.pitch);
   const step = ship.speed * dt;
   p.x += -Math.sin(ship.heading) * cosP * step;
   p.y += Math.sin(ship.pitch) * step;
-  p.z += -Math.cos(ship.heading) * cosP * step - TERRAIN_ROW_SPACING;
+  p.z += -Math.cos(ship.heading) * cosP * step - groundFlow * dt;
 
   // ----- bounds -----
   // Hard terrain clearance: never let the keel dip into the grid. If it

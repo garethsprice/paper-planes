@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import { createNoise3D, type NoiseFunction3D } from 'simplex-noise';
-import { COLS, ROWS, WIDTH, DEPTH, ENVELOPE_CELL } from '../constants.ts';
+import { COLS, ROWS, WIDTH, DEPTH, ENVELOPE_CELL, TERRAIN_ROW_SPACING } from '../constants.ts';
 import type { SceneCore, SharedUniforms } from './core.ts';
 
 const TERRAIN_VERTEX_SHADER = /* glsl */ `
@@ -154,6 +154,8 @@ export type Terrain = {
   envelope: Float32Array;
   envCols: number;
   envRows: number;
+  /** World-Z offset of the grid this frame (see setFlowOffset). */
+  zOffset: number;
 };
 
 export function createTerrain(core: SceneCore): Terrain {
@@ -243,7 +245,22 @@ export function createTerrain(core: SceneCore): Terrain {
     envelope: new Float32Array(envCols * envRows),
     envCols,
     envRows,
+    zOffset: 0,
   };
+}
+
+/**
+ * Slide the grid by the fraction of a row the flow has advanced since the
+ * last whole-row shift (0 ≤ frac < 1). The data only moves in whole rows;
+ * this sub-row offset makes the motion continuous at any frame rate — on a
+ * display faster than the row rate the grid glides between shifts instead
+ * of stepping. Height lookups take the offset into account.
+ */
+export function setFlowOffset(terrain: Terrain, frac: number): void {
+  const z = -frac * TERRAIN_ROW_SPACING;
+  terrain.zOffset = z;
+  terrain.mesh.position.z = z;
+  terrain.mirror.position.z = z;
 }
 
 /** Rebuild the coarse envelope from the fine heights (call once per frame,
@@ -274,7 +291,7 @@ export function updateEnvelope(terrain: Terrain): void {
 export function envelopeAt(terrain: Terrain, wx: number, wz: number): number {
   const { envelope, envCols, envRows } = terrain;
   const fx = (wx / WIDTH + 0.5) * (COLS - 1) / ENVELOPE_CELL;
-  const fz = (wz / DEPTH + 0.5) * (ROWS - 1) / ENVELOPE_CELL;
+  const fz = ((wz - terrain.zOffset) / DEPTH + 0.5) * (ROWS - 1) / ENVELOPE_CELL;
   const cx = Math.max(0, Math.min(envCols - 1, fx | 0));
   const cz = Math.max(0, Math.min(envRows - 1, fz | 0));
   return envelope[cz * envCols + cx];
@@ -284,7 +301,7 @@ export function envelopeAt(terrain: Terrain, wx: number, wz: number): number {
 export function bilerpHeight(terrain: Terrain, wx: number, wz: number): number {
   const heights = terrain.heights;
   const fx = (wx / WIDTH + 0.5) * (COLS - 1);
-  const fz = (wz / DEPTH + 0.5) * (ROWS - 1);
+  const fz = ((wz - terrain.zOffset) / DEPTH + 0.5) * (ROWS - 1);
   const ix0 = Math.max(0, Math.min(COLS - 2, Math.floor(fx)));
   const iz0 = Math.max(0, Math.min(ROWS - 2, Math.floor(fz)));
   const tx = Math.max(0, Math.min(1, fx - ix0));

@@ -43,7 +43,9 @@ export class HybridRenderPass extends RenderPass {
       super.render(renderer, writeBuffer, readBuffer, deltaTime, maskActive);
       return;
     }
-    const target = this.renderToScreen ? null : writeBuffer;
+    // RenderPass has needsSwap = false and draws into readBuffer, which is
+    // what the passes after it read; the stereo branch must do the same.
+    const target = this.renderToScreen ? null : readBuffer;
     renderer.setRenderTarget(target);
     if (this.clear) renderer.clear();
     this.scene.updateMatrixWorld();

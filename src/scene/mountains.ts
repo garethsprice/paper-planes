@@ -11,17 +11,27 @@ import { MOUNTAIN_RADII, MOUNTAIN_SEGMENTS, SUN_MOUNTAIN_RIM, SUN_MOUNTAIN_HAZE 
 
 const VERT = /* glsl */ `
   attribute float aFade;
+  attribute float aBase;
+  attribute float aPhase;
   varying float vH;
   varying float vFade;
   varying vec2 vXZ;
   varying vec3 vViewDir;
   uniform float uPeak;
+  uniform float uHeightLift;
+  uniform float uTime;
   void main() {
-    vH = clamp(position.y / uPeak, 0.0, 1.0);
+    // Height = the noise-field shape (aBase, refreshed on the CPU a few
+    // times a second) × the song's lift and beat swell × a slow per-vertex
+    // sway — the fast-moving factors evaluated here so the CPU never
+    // touches the buffer for them.
+    float sway = 1.0 + 0.04 * sin(uTime * 0.05 + aPhase);
+    vec3 p = vec3(position.x, aBase * uHeightLift * sway, position.z);
+    vH = clamp(p.y / uPeak, 0.0, 1.0);
     vFade = aFade;
-    vXZ = position.xz;
-    vViewDir = position - cameraPosition;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vXZ = p.xz;
+    vViewDir = p - cameraPosition;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
   }
 `;
 
@@ -102,17 +112,24 @@ export function createMountains(
       if (r < rings - 1) index.push(v, (r + 1) * N + i);
     }
   }
+  // Per-vertex sway phase (the old `v * 0.37`), so the shader can sway.
+  const phase = new Float32Array(count);
+  for (let v = 0; v < count; v++) phase[v] = v * 0.37;
+  const base = new Float32Array(count);
   const geometry = new THREE.BufferGeometry();
-  const posAttr = new THREE.BufferAttribute(positions, 3);
-  posAttr.setUsage(THREE.DynamicDrawUsage);
-  geometry.setAttribute('position', posAttr);
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute('aFade', new THREE.BufferAttribute(fade, 1));
+  geometry.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+  const baseAttr = new THREE.BufferAttribute(base, 1);
+  baseAttr.setUsage(THREE.DynamicDrawUsage);
+  geometry.setAttribute('aBase', baseAttr);
   geometry.setIndex(index);
-  geometry.computeBoundingSphere();
 
   const material = new THREE.ShaderMaterial({
     uniforms: {
       uPeak: { value: 40 },
+      uHeightLift: { value: 1 }, // song lift × beat swell (uLift below is the hush alpha)
+      uTime: { value: 0 },
       uLow: { value: new THREE.Color(0x0d1230) },
       uHigh: { value: new THREE.Color(0x6a5cb4) },
       uSky: { value: new THREE.Color(0x000308) },
@@ -130,6 +147,7 @@ export function createMountains(
   });
   const mesh = new THREE.LineSegments(geometry, material);
   mesh.renderOrder = -1; // behind everything translucent
+  mesh.frustumCulled = false; // the ring surrounds the camera; heights live in the shader
   scene.add(mesh);
 
   // Per-vertex rise with radius so foothills climb into peaks at the back.
@@ -139,28 +157,38 @@ export function createMountains(
     for (let i = 0; i < N; i++) rise[r * N + i] = k;
   }
 
+  // The shape of each vertex comes from a continuous 2-D noise field over
+  // world XZ (so rings and spokes trace one surface rather than a fence),
+  // sampled at z + scroll: advancing the scroll slides the whole field
+  // through the ring, so peaks ahead grow and pass while the far rings
+  // crawl — parallax, the cue that says "we are moving through this". The
+  // field drifts so slowly (a few hundredths of a noise unit per second)
+  // that refreshing a quarter of the vertices per frame is indistinguishable
+  // from refreshing them all; the fast factors (lift, beat swell, sway)
+  // are applied per frame in the vertex shader.
+  const SLICES = 4;
+  let slice = 0;
+  const refresh = (v: number, scroll: number): void => {
+    const x = positions[v * 3];
+    const z = positions[v * 3 + 2] + scroll;
+    const n1 = noise3(x * 0.014, z * 0.014, 1.7) * 0.5 + 0.5;
+    const n2 = noise3(x * 0.045, z * 0.045, 4.1) * 0.5 + 0.5;
+    const shape = Math.pow(n1 * 0.72 + n2 * 0.28, 1.8);
+    base[v] = (6 + 40 * shape) * rise[v];
+  };
   const update = (envelope: number, time: number, scroll: number, breath: number): void => {
-    // Heights come from a continuous 2-D noise field over world XZ (so
-    // rings and spokes trace one surface rather than a fence), sampled at
-    // z + scroll: advancing the scroll slides the whole field through the
-    // ring, so peaks ahead grow and pass while the far rings crawl —
-    // parallax, the cue that says "we are moving through this". The range
-    // breathes with the long-term energy (quiet leaves low foothills, a full
-    // section raises the peaks) and the crests swell faintly on the beat.
+    // The range breathes with the long-term energy (quiet leaves low
+    // foothills, a full section raises the peaks) and the crests swell
+    // faintly on the beat.
     const lift = (0.4 + 0.6 * envelope) * (1 + breath * 0.025);
-    const arr = posAttr.array as Float32Array;
-    for (let v = 0; v < count; v++) {
-      const x = arr[v * 3];
-      const z = arr[v * 3 + 2] + scroll;
-      const n1 = noise3(x * 0.014, z * 0.014, 1.7) * 0.5 + 0.5;
-      const n2 = noise3(x * 0.045, z * 0.045, 4.1) * 0.5 + 0.5;
-      const shape = Math.pow(n1 * 0.72 + n2 * 0.28, 1.8);
-      const sway = 1 + 0.04 * Math.sin(time * 0.05 + v * 0.37);
-      arr[v * 3 + 1] = (6 + 40 * shape) * rise[v] * lift * sway;
-    }
-    posAttr.needsUpdate = true;
+    for (let v = slice; v < count; v += SLICES) refresh(v, scroll);
+    slice = (slice + 1) % SLICES;
+    baseAttr.needsUpdate = true;
+    material.uniforms.uHeightLift.value = lift;
+    material.uniforms.uTime.value = time;
     material.uniforms.uPeak.value = 56 * lift;
   };
+  for (let v = 0; v < count; v++) refresh(v, 0);
   update(0.5, 0, 0, 0);
   return { mesh, material, update };
 }

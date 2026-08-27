@@ -1,48 +1,63 @@
 // WebGLRenderer + post-processing pipeline. The composer chain is:
-//   HybridRenderPass (mono or stereo) → bloom → chromatic → OutputPass
-// In stereo, bloom + chromatic are scaled down so the seam smear stays
-// minimal. In a WebXR session we bypass the composer and render directly
-// per eye via the headset's view layout.
+//   HybridRenderPass (mono or stereo) → bloom → ChromaticOutputPass
+// The output pass does the chromatic fringe in the same fullscreen shader
+// as tone mapping and the sRGB transfer, so the frame makes one trip
+// through a full-resolution pass instead of two. In stereo the fringe is
+// off (it is radial from the centre and would centre on the seam) and the
+// bloom is scaled down so the seam smear stays minimal. In a WebXR session
+// we bypass the composer and render directly per eye via the headset's
+// view layout.
 
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import {
   BLOOM_DIVISOR, MOOD_DIM_BUILD, MOOD_FLASH_EXPOSURE, MOOD_FLASH_BLOOM,
 } from '../constants.ts';
 import type { StereoState } from './stereo.ts';
 import { HybridRenderPass } from './stereo.ts';
 
-const ChromaticAberrationShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-    uAmount: { value: 0.0006 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uAmount;
-    varying vec2 vUv;
-    void main() {
-      vec2 dir = vUv - 0.5;
-      float r = texture2D(tDiffuse, vUv - dir * uAmount).r;
-      float g = texture2D(tDiffuse, vUv).g;
-      float b = texture2D(tDiffuse, vUv + dir * uAmount).b;
-      gl_FragColor = vec4(r, g, b, 1.0);
+/** three's OutputPass (tone mapping + colour space) with a chromatic
+ *  aberration fringe folded into the same fullscreen draw: each channel is
+ *  sampled at a slightly different radial offset before tone mapping —
+ *  exactly what the separate ShaderPass did, minus a full-resolution
+ *  render-target round trip per frame. `uAmount` = 0 is the identity. */
+class ChromaticOutputPass extends OutputPass {
+  /** Fringe amount in UV units (0 = off). */
+  readonly amount = { value: 0 };
+
+  constructor() {
+    super();
+    (this.uniforms as Record<string, THREE.IUniform>).uAmount = this.amount;
+    const src = this.material.fragmentShader;
+    const patched = src
+      .replace(
+        'uniform sampler2D tDiffuse;',
+        'uniform sampler2D tDiffuse;\n\t\tuniform float uAmount;',
+      )
+      .replace(
+        'gl_FragColor = texture2D( tDiffuse, vUv );',
+        `vec2 dir = vUv - 0.5;
+			gl_FragColor = vec4(
+				texture2D( tDiffuse, vUv - dir * uAmount ).r,
+				texture2D( tDiffuse, vUv ).g,
+				texture2D( tDiffuse, vUv + dir * uAmount ).b,
+				1.0 );`,
+      );
+    if (patched === src || !patched.includes('uAmount )')) {
+      throw new Error('ChromaticOutputPass: OutputShader source changed; update the patch');
     }
-  `,
-};
+    this.material.fragmentShader = patched;
+    this.material.needsUpdate = true;
+  }
+}
 
 export type RenderPipeline = {
   renderer: THREE.WebGLRenderer;
   composer: EffectComposer;
   bloom: UnrealBloomPass;
-  chromaticPass: ShaderPass;
+  output: ChromaticOutputPass;
 };
 
 export function createRenderPipeline(
@@ -53,7 +68,12 @@ export function createRenderPipeline(
 ): RenderPipeline {
   const renderer = new THREE.WebGLRenderer({
     canvas,
-    antialias: true,
+    // Every 2D frame goes through the composer, whose render targets are
+    // single-sampled; the default framebuffer only ever receives the
+    // output pass's fullscreen quad. A multisampled backbuffer would cost
+    // memory bandwidth and a resolve every frame for nothing.
+    antialias: false,
+    stencil: false,
     powerPreference: 'high-performance',
   });
   // DPR cap of 1.5 — halves per-pixel fragment work on HiDPI screens with
@@ -79,11 +99,10 @@ export function createRenderPipeline(
     0.42, // threshold — only genuinely bright crests and the ships bloom
   );
   composer.addPass(bloom);
-  const chromaticPass = new ShaderPass(ChromaticAberrationShader);
-  composer.addPass(chromaticPass);
-  composer.addPass(new OutputPass());
+  const output = new ChromaticOutputPass();
+  composer.addPass(output);
 
-  return { renderer, composer, bloom, chromaticPass };
+  return { renderer, composer, bloom, output };
 }
 
 export type PostFxInput = {
@@ -117,14 +136,10 @@ export function updatePostFx(pipeline: RenderPipeline, input: PostFxInput): void
     BASE_EXPOSURE * (1 - MOOD_DIM_BUILD * anticipation) * (1 - 0.3 * hush)
     + flash * MOOD_FLASH_EXPOSURE;
   pipeline.bloom.radius = stereoEnabled ? 0.25 : 0.32;
-  pipeline.chromaticPass.enabled = !stereoEnabled;
-  if (!stereoEnabled) {
-    // A whisper of fringing — beyond ~0.004 the stars split into RGB triplets.
-    pipeline.chromaticPass.uniforms.uAmount.value = Math.min(
-      0.0035,
-      0.0003 + bassEnergy * 0.0015 * I + dropBoost * 0.0015,
-    );
-  }
+  // A whisper of fringing — beyond ~0.004 the stars split into RGB triplets.
+  pipeline.output.amount.value = stereoEnabled
+    ? 0
+    : Math.min(0.0035, 0.0003 + bassEnergy * 0.0015 * I + dropBoost * 0.0015);
 }
 
 /** Render-call dispatch: bypass composer when WebXR is presenting (the

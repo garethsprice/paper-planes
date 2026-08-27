@@ -114,10 +114,16 @@ export const MOUNTAIN_PARALLAX_ENERGY = 0.9; // +90% at full energy
 export const BLOOM_DIVISOR = 2;
 
 // ----- terrain motion -----
-// The spectrogram advances one grid row per frame toward −Z. Ships live in
-// the landscape's reference frame, so they are advected by exactly this much
-// each frame and must fly into the flow (+Z) to hold station.
+// The spectrogram streams toward −Z at TERRAIN_ROW_RATE grid rows per
+// second — a rate in time, not one row per frame, so a dropped frame no
+// longer slows the world. 0 locks the rate to the display's refresh rate,
+// measured at startup (render/refreshRate.ts), which keeps the pace the
+// scene was tuned at: 60 rows/s on a 60 Hz screen, 120 on a ProMotion one.
+// Set a number to fix it everywhere. Ships live in the landscape's
+// reference frame: they are advected −Z by the same flow (in u/s) and must
+// fly into it (+Z) to hold station.
 export const TERRAIN_ROW_SPACING = DEPTH / (ROWS - 1);
+export const TERRAIN_ROW_RATE = 0;
 
 // ----- ship flight model (kinematic coordinated flight, landscape frame) -----
 export const SHIP_X_BOUND = WIDTH * 0.40;

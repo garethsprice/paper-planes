@@ -32,11 +32,16 @@ html, body {
   font-size: 12px;
   letter-spacing: 0.04em;
   text-transform: lowercase;
-  transition: opacity 0.5s ease;
+  /* Fade out, then drop out of compositing entirely: a backdrop-filter is
+     re-blurred every frame the canvas beneath it changes, which is every
+     frame, so an invisible strip must not stay merely transparent. */
+  transition: opacity 0.5s ease, visibility 0s;
 }
 #ui.idle {
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
+  transition: opacity 0.5s ease, visibility 0s linear 0.5s;
 }
 .btn {
   padding: 6px 12px;
@@ -96,6 +101,8 @@ html, body {
   opacity: 0.2;
   /* JS drives opacity per frame — disable transitions to avoid lag/jitter */
   transition: none;
+  /* Own compositor layer, so a beat doesn't repaint the blurred strip. */
+  will-change: opacity;
 }
 #dbg {
   padding: 4px 8px;
@@ -128,15 +135,27 @@ html, body {
     0 0 18px rgba(200, 225, 255, 0.55),
     0 0 48px rgba(255, 214, 170, 0.35);
   mix-blend-mode: screen;
-  opacity: 0;
-  filter: blur(6px);
   pointer-events: none;
   user-select: none;
   z-index: 5;
+}
+#banner {
+  top: 22%;
+  transform: translate(-50%, 0) translateY(10px);
+  max-width: 80vw;
+  font-size: clamp(28px, 4.2vw, 64px);
+  opacity: 0;
+  filter: blur(6px);
+  /* Hidden (not just transparent) between phrases: a blurred, screen-
+     blended layer over the canvas costs compositor work even at opacity 0.
+     The visibility flip is delayed past the dissolve on the way out and
+     immediate on the way in. */
+  visibility: hidden;
   transition:
     opacity 1.6s cubic-bezier(0.2, 0.6, 0.2, 1),
     filter 1.6s cubic-bezier(0.2, 0.6, 0.2, 1),
-    transform 6s cubic-bezier(0.1, 0.5, 0.2, 1);
+    transform 6s cubic-bezier(0.1, 0.5, 0.2, 1),
+    visibility 0s linear 3.2s;
 }
 #banner.long {
   font-size: clamp(20px, 2.6vw, 40px);
@@ -148,6 +167,12 @@ html, body {
   opacity: 1;
   filter: blur(0);
   transform: translate(-50%, 0) translateY(-14px);
+  visibility: visible;
+  transition:
+    opacity 1.6s cubic-bezier(0.2, 0.6, 0.2, 1),
+    filter 1.6s cubic-bezier(0.2, 0.6, 0.2, 1),
+    transform 6s cubic-bezier(0.1, 0.5, 0.2, 1),
+    visibility 0s;
 }
 #banner.out {
   opacity: 0;

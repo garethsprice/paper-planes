@@ -49,11 +49,11 @@ const WEIGHTS = [1.0, 1.0, 2.5, 0.3];
 /** Ease the fingerprint toward the current features (call every frame). */
 export function updateRhyme(rhyme: Rhyme, f: RhymeFeatures, dt: number): void {
   const k = 1 - Math.exp(-dt / RHYME_FEATURE_S);
-  const raw = [f.energy, f.bassEnergy, f.centroid, Math.min(1, f.intensity / 1.5)];
-  const target = raw.map((v, i) => v * WEIGHTS[i]);
-  for (let i = 0; i < target.length; i++) {
-    rhyme.fingerprint[i] += (target[i] - rhyme.fingerprint[i]) * k;
-  }
+  const fp = rhyme.fingerprint;
+  fp[0] += (f.energy * WEIGHTS[0] - fp[0]) * k;
+  fp[1] += (f.bassEnergy * WEIGHTS[1] - fp[1]) * k;
+  fp[2] += (f.centroid * WEIGHTS[2] - fp[2]) * k;
+  fp[3] += (Math.min(1, f.intensity / 1.5) * WEIGHTS[3] - fp[3]) * k;
 }
 
 function distance(a: number[], b: number[]): number {
