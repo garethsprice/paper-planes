@@ -90,18 +90,22 @@ function inFrissonWindow(): boolean {
 let lyricNote = '';
 /** Show the pending phrase if a moment allows (or `force` on an event). A
  *  phrase that has waited fallbackS with the music still up shows anyway —
- *  moments are preferred, not required. */
+ *  moments are preferred, not required. Expiry (freshS) is checked only when
+ *  the phrase can't be shown this frame, so freshS == fallbackS still lets
+ *  the fallback fire on the boundary frame instead of expiring it. */
 function tryShowLyric(force: boolean): void {
   if (!pendingLyric) { lyricNote = ''; return; }
   const age = sceneTime - pendingLyric.at;
-  if (age > lyricsSettings.freshS) { pendingLyric = null; lyricNote = 'last phrase expired unshown'; return; }
+  const expire = (): void => { pendingLyric = null; lyricNote = 'last phrase expired unshown'; };
   const sinceBanner = sceneTime - lastBannerAt;
   if (sinceBanner < lyricsSettings.minIntervalS) {
+    if (age > lyricsSettings.freshS) { expire(); return; }
     lyricNote = `pending "${pendingLyric.text}" · gap ${(lyricsSettings.minIntervalS - sinceBanner).toFixed(0)}s`;
     return;
   }
   const fallback = age >= lyricsSettings.fallbackS && flock.energy >= lyricsSettings.fallbackEnergy && mood.hush < 0.5;
   if (!force && !inFrissonWindow() && !fallback) {
+    if (age > lyricsSettings.freshS) { expire(); return; }
     lyricNote = `pending "${pendingLyric.text}" · waiting for a moment (${(lyricsSettings.fallbackS - age).toFixed(0)}s, energy ${flock.energy.toFixed(2)})`;
     return;
   }

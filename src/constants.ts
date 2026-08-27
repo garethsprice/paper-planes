@@ -295,15 +295,24 @@ export const RHYME_MAX_MEMORIES = 24;
 
 // ----- lyrics (see audio/lyrics.ts, ui/banner.ts) -----
 // A wrong word breaks the spell, so the gate is strict. Chrome reports
-// confidence 0..1 on final results; sung lyrics rarely clear 0.9.
-export const LYRICS_MIN_CONFIDENCE = 0.86;        // phrases of 3+ words
-export const LYRICS_MIN_CONFIDENCE_SHORT = 0.92;  // one or two words
+// confidence 0..1 on final results; sung lyrics rarely clear 0.9, so the
+// floors are low for phrases (the word gate does most of the work) and
+// higher for one or two words, where a wrong guess has nothing to hide behind.
+export const LYRICS_MIN_CONFIDENCE = 0.5;         // phrases of 3+ words
+export const LYRICS_MIN_CONFIDENCE_SHORT = 0.8;   // one or two words
 export const LYRICS_MAX_WORDS = 16;
 export const LYRICS_MIN_WORD_LEN = 3;
-export const LYRICS_MIN_CONTENT_RATIO = 0.5;      // fraction of non-filler words required; 0 = allow all-filler
-export const LYRICS_FRESH_S = 25;                 // a phrase older than this is never shown
+export const LYRICS_MIN_CONTENT_RATIO = 0.1;      // fraction of non-filler words required; 0 = allow all-filler
+export const LYRICS_FRESH_S = 5;                  // a phrase older than this is never shown
 export const LYRICS_FALLBACK_S = 5;               // waited this long with no moment → show if the music is up
-export const LYRICS_FALLBACK_ENERGY = 0.45;       // …and energy is at least this
+export const LYRICS_FALLBACK_ENERGY = 0.2;        // …and energy is at least this
+// The recogniser streams mic audio to Google for as long as it listens. If
+// nothing is heard for LYRICS_IDLE_TIMEOUT_S (instrumental music, silence,
+// or a dead connection) it stops and retries after an exponentially growing
+// pause, so it never streams needlessly; any result resets the backoff.
+export const LYRICS_IDLE_TIMEOUT_S = 60;
+export const LYRICS_BACKOFF_BASE_S = 5;           // first pause; doubles each idle session or network failure
+export const LYRICS_BACKOFF_MAX_S = 320;          // 5 → 10 → 20 → 40 → 80 → 160 → 320
 export const LYRICS_MIN_INTERVAL_S = 12;          // banners are rare
 export const BANNER_HOLD_S = 4.5;                 // visible before dissolving
 

@@ -21,8 +21,8 @@ type SliderSpec = {
 };
 
 const SLIDERS: SliderSpec[] = [
-  { key: 'minConfidence', label: 'confidence · 3+ words', min: 0.5, max: 1, step: 0.01 },
-  { key: 'minConfidenceShort', label: 'confidence · 1–2 words', min: 0.5, max: 1, step: 0.01 },
+  { key: 'minConfidence', label: 'confidence · 3+ words', min: 0.2, max: 1, step: 0.01 },
+  { key: 'minConfidenceShort', label: 'confidence · 1–2 words', min: 0.2, max: 1, step: 0.01 },
   { key: 'maxWords', label: 'max words', min: 1, max: 20, step: 1 },
   { key: 'minWordLen', label: 'min word length', min: 1, max: 6, step: 1 },
   { key: 'minContentRatio', label: 'min content words (0 = allow filler)', min: 0, max: 1, step: 0.05 },
@@ -31,6 +31,7 @@ const SLIDERS: SliderSpec[] = [
   { key: 'fallbackEnergy', label: '…if energy ≥', min: 0, max: 1, step: 0.05 },
   { key: 'freshS', label: 'phrase freshness (s)', min: 2, max: 60, step: 1 },
   { key: 'holdS', label: 'banner hold (s)', min: 1, max: 12, step: 0.5 },
+  { key: 'idleTimeoutS', label: 'stop after nothing heard for (s)', min: 10, max: 300, step: 5 },
 ];
 
 export function createDebugPanel(onTestBanner: (text: string) => void): DebugPanel {
@@ -101,7 +102,9 @@ export function createDebugPanel(onTestBanner: (text: string) => void): DebugPan
         ? 'off'
         : lyrics.listening
           ? 'listening'
-          : `idle${lyrics.lastError ? ` · ${lyrics.lastError}` : ''}`;
+          : lyrics.retryAt > 0
+            ? `paused · retry in ${Math.max(0, Math.ceil((lyrics.retryAt - performance.now()) / 1000))}s`
+            : `idle${lyrics.lastError ? ` · ${lyrics.lastError}` : ''}`;
     stateEl.className = `dp-state ${lyrics.listening && lyrics.enabled ? 'live' : ''}`;
 
     // Rebuild only when the feed changed (by length + last event time).

@@ -8,10 +8,18 @@
 // only, a stoplist of function words, and no phrase that is mostly stoplist.
 // Accepted phrases are handed to the caller, who decides *when* to show
 // them (see main.ts — frisson moments only).
+//
+// Listening streams mic audio for as long as the session is open, so a
+// session that hears nothing for `idleTimeoutS` (instrumental music, silence,
+// a dropped connection) is stopped and retried after an exponentially
+// growing pause; Chrome's `network` error is treated the same way rather
+// than as fatal, since its continuous mode drops the connection after a
+// minute or two. Any final result resets the backoff.
 
 import {
   LYRICS_MIN_CONFIDENCE, LYRICS_MIN_CONFIDENCE_SHORT, LYRICS_MAX_WORDS, LYRICS_MIN_WORD_LEN,
   LYRICS_MIN_CONTENT_RATIO, LYRICS_FRESH_S, LYRICS_MIN_INTERVAL_S, BANNER_HOLD_S, LYRICS_FALLBACK_S, LYRICS_FALLBACK_ENERGY,
+  LYRICS_IDLE_TIMEOUT_S, LYRICS_BACKOFF_BASE_S, LYRICS_BACKOFF_MAX_S,
 } from '../constants.ts';
 
 /** Live-tunable gate and timing (the debug panel binds sliders to these). */
@@ -27,6 +35,10 @@ export const lyricsSettings = {
   holdS: BANNER_HOLD_S,
   fallbackS: LYRICS_FALLBACK_S,
   fallbackEnergy: LYRICS_FALLBACK_ENERGY,
+  /** Stop listening after this long with no final result, then back off. */
+  idleTimeoutS: LYRICS_IDLE_TIMEOUT_S,
+  backoffBaseS: LYRICS_BACKOFF_BASE_S,
+  backoffMaxS: LYRICS_BACKOFF_MAX_S,
 };
 
 /** One thing the recogniser reported — for the live feed. */
@@ -75,6 +87,10 @@ export type Lyrics = {
   enabled: boolean;
   listening: boolean;
   lastError: string;
+  /** performance.now() at which a backed-off retry will start, or 0 when not paused. */
+  retryAt: number;
+  /** Consecutive sessions that heard nothing (or failed); sets the backoff. */
+  failures: number;
   /** Most recent accepted phrases, newest last. */
   recent: { text: string; at: number; confidence: number }[];
   /** Live feed for the debug panel, newest last (capped). */
@@ -94,6 +110,8 @@ export function createLyrics(onPhrase: (text: string, confidence: number) => voi
     enabled: true,
     listening: false,
     lastError: '',
+    retryAt: 0,
+    failures: 0,
     recent: [],
     feed: [],
     start: () => {},
@@ -110,6 +128,49 @@ export function createLyrics(onPhrase: (text: string, confidence: number) => voi
 
   let rec: Recognition | null = null;
   let wantListening = false;
+  let backingOff = false;
+  let lastResultAt = 0;
+  let idleTimer: number | undefined;
+  let retryTimer: number | undefined;
+  const state = (transcript: string): void =>
+    push({ kind: 'state', transcript, confidence: 0, accepted: false, reason: '' });
+
+  /** Pause listening and schedule a retry; the pause doubles per consecutive failure. */
+  const enterBackoff = (why: string): void => {
+    const S = lyricsSettings;
+    lyrics.failures++;
+    const delayS = Math.min(S.backoffMaxS, S.backoffBaseS * 2 ** (lyrics.failures - 1));
+    backingOff = true;
+    lyrics.listening = false;
+    lyrics.retryAt = performance.now() + delayS * 1000;
+    window.clearTimeout(idleTimer);
+    window.clearTimeout(retryTimer);
+    state(`paused: ${why} · retry in ${delayS}s (attempt ${lyrics.failures})`);
+    retryTimer = window.setTimeout(() => {
+      backingOff = false;
+      lyrics.retryAt = 0;
+      if (!wantListening || !lyrics.enabled) return;
+      lastResultAt = performance.now();
+      safeStart();
+      state('listening again');
+    }, delayS * 1000);
+  };
+
+  /** Ticks while listening (≤ 5 s, so slider changes take effect promptly)
+   *  and backs off once nothing has been heard for idleTimeoutS. */
+  const armIdle = (): void => {
+    window.clearTimeout(idleTimer);
+    const remaining = lyricsSettings.idleTimeoutS * 1000 - (performance.now() - lastResultAt);
+    idleTimer = window.setTimeout(() => {
+      if (!wantListening || !lyrics.enabled || backingOff) return;
+      if (performance.now() - lastResultAt >= lyricsSettings.idleTimeoutS * 1000) {
+        enterBackoff(`nothing heard for ${lyricsSettings.idleTimeoutS}s`);
+        try { rec?.abort(); } catch { /* ignore */ }
+      } else {
+        armIdle();
+      }
+    }, Math.max(250, Math.min(5000, remaining)));
+  };
 
   /** Returns the cleaned phrase, or a rejection reason prefixed with '!'. */
   const gate = (transcript: string, confidence: number): string => {
@@ -145,6 +206,9 @@ export function createLyrics(onPhrase: (text: string, confidence: number) => voi
           push({ kind: 'interim', transcript: alt.transcript.trim(), confidence: 0, accepted: false, reason: '' });
           continue;
         }
+        // Any final result means the service is hearing words: reset the backoff.
+        lastResultAt = performance.now();
+        lyrics.failures = 0;
         const verdict = gate(alt.transcript, alt.confidence);
         const accepted = !verdict.startsWith('!');
         push({
@@ -163,21 +227,25 @@ export function createLyrics(onPhrase: (text: string, confidence: number) => voi
     };
     r.onerror = (e) => {
       lyrics.lastError = e.error;
-      // 'no-speech' and 'aborted' are routine; 'not-allowed' / 'network'
-      // mean we should stop trying.
+      // 'no-speech' and 'aborted' are routine; 'not-allowed' means stop
+      // trying; 'network' is Chrome dropping the stream — back off and retry.
       if (e.error !== 'no-speech' && e.error !== 'aborted') {
         push({ kind: 'error', transcript: e.error, confidence: 0, accepted: false, reason: '' });
       }
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'network') {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
         wantListening = false;
         lyrics.listening = false;
+        window.clearTimeout(idleTimer);
+      } else if (e.error === 'network' && wantListening && lyrics.enabled && !backingOff) {
+        enterBackoff('network error');
       }
     };
     r.onend = () => {
       lyrics.listening = false;
-      // Chrome ends continuous sessions periodically; come straight back.
-      if (wantListening && lyrics.enabled) {
-        setTimeout(() => { if (wantListening && lyrics.enabled) safeStart(); }, 300);
+      // Chrome ends continuous sessions periodically; come straight back
+      // (unless we are deliberately paused — the retry timer handles that).
+      if (wantListening && lyrics.enabled && !backingOff) {
+        setTimeout(() => { if (wantListening && lyrics.enabled && !backingOff) safeStart(); }, 300);
       }
     };
     return r;
@@ -192,20 +260,33 @@ export function createLyrics(onPhrase: (text: string, confidence: number) => voi
       // already started — fine
       lyrics.listening = true;
     }
+    armIdle();
+  };
+
+  /** Forget any backoff in progress (an explicit start/stop resets the clock). */
+  const resetBackoff = (): void => {
+    window.clearTimeout(idleTimer);
+    window.clearTimeout(retryTimer);
+    backingOff = false;
+    lyrics.retryAt = 0;
+    lyrics.failures = 0;
   };
 
   lyrics.start = () => {
     wantListening = true;
     if (lyrics.enabled) {
+      resetBackoff();
+      lastResultAt = performance.now();
       safeStart();
-      push({ kind: 'state', transcript: 'listening', confidence: 0, accepted: false, reason: '' });
+      state('listening');
     }
   };
   lyrics.stop = () => {
     wantListening = false;
     lyrics.listening = false;
+    resetBackoff();
     try { rec?.abort(); } catch { /* ignore */ }
-    push({ kind: 'state', transcript: 'stopped', confidence: 0, accepted: false, reason: '' });
+    state('stopped');
   };
   return lyrics;
 }
