@@ -113,17 +113,14 @@ html, body {
 #dbg .num { color: #cfe6ff; }
 
 /* ----- lyric banner: ethereal text in the sky ----- */
-#banner {
+/* Shared "words in the sky" type: the lyric banner and the start invite. */
+.skytext {
   position: fixed;
   left: 50%;
-  top: 22%;
-  transform: translate(-50%, 0) translateY(10px);
-  max-width: 80vw;
   text-align: center;
   font-family: 'Cormorant Garamond', 'EB Garamond', 'Garamond', 'Georgia', serif;
   font-weight: 300;
   font-style: italic;
-  font-size: clamp(28px, 4.2vw, 64px);
   letter-spacing: 0.22em;
   line-height: 1.25;
   color: rgba(236, 244, 255, 0.92);
@@ -159,7 +156,61 @@ html, body {
   transition:
     opacity 3.2s ease-out,
     filter 3.2s ease-out,
-    transform 3.2s ease-out;
+    transform 3.2s ease-out,
+    visibility 0s linear 3.2s;
+}
+
+/* ----- start invite: breathes in the sky until a source connects ----- */
+/* The wrapper fades in/out by class transitions only; the breathing
+   keyframes live on the inner lines, because a transition won't start on a
+   property the same element was just animating. The breath animates opacity
+   alone (the glow dims with it), so it runs on the compositor without
+   re-rasterising the text every frame. */
+#invite {
+  top: 44%;
+  transform: translate(-50%, -50%) translateY(10px);
+  max-width: 90vw;
+  font-size: clamp(24px, 3.4vw, 52px);
+  opacity: 0;
+  filter: blur(6px);
+  transition:
+    opacity 2.4s cubic-bezier(0.2, 0.6, 0.2, 1),
+    filter 2.4s cubic-bezier(0.2, 0.6, 0.2, 1),
+    transform 2.4s cubic-bezier(0.2, 0.6, 0.2, 1);
+}
+#invite.in {
+  opacity: 1;
+  filter: blur(0);
+  transform: translate(-50%, -50%);
+}
+#invite .invite-main,
+#invite .invite-sub {
+  animation: invite-breathe 5s ease-in-out 2.4s infinite;
+}
+#invite .invite-sub {
+  margin-top: 0.9em;
+  font-size: clamp(12px, 1.1vw, 17px);
+  letter-spacing: 0.34em;
+  opacity: 0.6;
+  animation-name: invite-breathe-sub;
+}
+#invite.out {
+  opacity: 0;
+  filter: blur(10px);
+  transform: translate(-50%, -50%) translateY(-24px);
+  transition:
+    opacity 2.4s ease-out,
+    filter 2.4s ease-out,
+    transform 2.4s ease-out;
+}
+#invite.gone { display: none; }
+@keyframes invite-breathe {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.62; }
+}
+@keyframes invite-breathe-sub {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 0.35; }
 }
 
 /* ----- lyrics debug panel ----- */

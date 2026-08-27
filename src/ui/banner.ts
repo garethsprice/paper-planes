@@ -15,6 +15,7 @@ export type Banner = {
 export function createBanner(): Banner {
   const el = document.createElement('div');
   el.id = 'banner';
+  el.className = 'skytext';
   el.setAttribute('aria-live', 'polite');
   document.body.appendChild(el);
   let shownAt = -Infinity;
@@ -37,4 +38,24 @@ export function createBanner(): Banner {
   };
 
   return { el, show, age: () => (performance.now() - shownAt) / 1000 };
+}
+
+/** The "click anywhere to start the mic" invite (index.html `#invite`), set
+ *  in the same sky type as the banner. It drifts in shortly after load and
+ *  breathes until the first source connects, then dissolves like a banner
+ *  and is removed from layout. */
+export function revealInvite(): void {
+  window.setTimeout(() => {
+    const el = document.getElementById('invite');
+    if (el && !el.classList.contains('out')) el.classList.add('in');
+  }, 500);
+}
+
+export function dismissInvite(): void {
+  const el = document.getElementById('invite');
+  if (!el || el.classList.contains('out')) return;
+  el.classList.add('out');
+  el.addEventListener('transitionend', () => el.classList.add('gone'), { once: true });
+  // If transitions are disabled (reduced motion), still remove it.
+  window.setTimeout(() => el.classList.add('gone'), 3000);
 }

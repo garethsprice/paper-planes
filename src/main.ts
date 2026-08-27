@@ -30,10 +30,10 @@ import { createMountains } from './scene/mountains.ts';
 import { createTrails } from './scene/trails.ts';
 import { createLandscape, writeLandscapeRow } from './scene/landscape.ts';
 import { createLyrics } from './audio/lyrics.ts';
-import { createBanner } from './ui/banner.ts';
+import { createBanner, dismissInvite, revealInvite } from './ui/banner.ts';
 import { createDebugPanel } from './ui/debugPanel.ts';
 import { lyricsSettings } from './audio/lyrics.ts';
-import { createFlock, updateFlock } from './scene/flock.ts';
+import { createFlock, updateFlock, type FlockInput } from './scene/flock.ts';
 import {
   ensureAudio, getAudio, attachStream, loadAudioFile,
   type AudioState,
@@ -81,6 +81,7 @@ const landscape = createLandscape();
 // rhyme recall releases the freshest one to the sky. If a phrase arrives
 // while the scene is already in such a moment it shows at once.
 const banner = createBanner();
+revealInvite();
 let sceneTime = 0; // mirrors the loop's `t` for handlers outside it
 let pendingLyric: { text: string; at: number } | null = null;
 let lastBannerAt = -Infinity;
@@ -174,6 +175,7 @@ function loadFile(f: File): void {
   playBtn.disabled = false;
   playBtn.textContent = 'play';
   statusEl.textContent = f.name;
+  dismissInvite();
 }
 
 fileInput.addEventListener('change', () => {
@@ -219,6 +221,7 @@ micBtn.addEventListener('click', async () => {
     ensureBpm(bpmHandle, a.ctx);
     playBtn.disabled = true;
     statusEl.textContent = 'mic live';
+    dismissInvite();
     if (lyrics.enabled) lyrics.start();
   } catch (e) {
     statusEl.textContent = `mic blocked: ${(e as Error).message}`;
@@ -243,6 +246,7 @@ tabBtn.addEventListener('click', async () => {
     ensureBpm(bpmHandle, a.ctx);
     playBtn.disabled = true;
     statusEl.textContent = 'tab audio · source tab plays it';
+    dismissInvite();
   } catch (e) {
     statusEl.textContent = `tab audio failed: ${(e as Error).message}`;
   }
