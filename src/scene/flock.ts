@@ -50,6 +50,8 @@ export type FlockInput = {
   quiet: boolean;
   intensity: number;
   hasAudio: boolean;
+  anticipation: number;
+  release: number;
 };
 
 function smoothstep(e0: number, e1: number, x: number): number {
@@ -72,6 +74,9 @@ function stageArrival(ship: Ship, time: number): void {
   ship.roll = 0;
   ship.speed = 30;
   ship.accel = 0;
+  ship.flex = ship.flexVelocity = 0;
+  ship.previousPosition.copy(p);
+  ship.previousQuaternion.copy(ship.group.quaternion);
   ship.load = 0;
   ship.scatterUntil = -Infinity;
   ship.diveUntil = -Infinity;
@@ -100,7 +105,10 @@ export function updateFlock(flock: Flock, ships: Ship[], input: FlockInput): voi
   flock.energy += (norm - flock.energy) * (1 - Math.exp(-dt / tau));
   // Exponential: most of the range flies a handful, the top fills the sky.
   const u = smoothstep(FLOCK_E_LO, FLOCK_E_HI, flock.energy);
-  flock.desired = 1 + Math.round(Math.pow(u, FLOCK_EXPONENT) * (SHIP_MAX - 1));
+  // Everyday passages keep space around the leader. Builds stage the larger flock.
+  const scope = Math.max(0.3, input.anticipation, input.release);
+  flock.desired = 1 + Math.round(Math.pow(u, FLOCK_EXPONENT) * (SHIP_MAX - 1) * scope);
+  if (input.anticipation > 0.15) flock.desired = Math.max(flock.desired, 1 + Math.round(input.anticipation * (SHIP_MAX - 1)));
 
   // ----- census -----
   let present = 0;

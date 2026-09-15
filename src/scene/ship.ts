@@ -75,6 +75,10 @@ export type Ship = {
   accel: number;
   /** 0..1 aerodynamic load (bank g, acceleration, dive) — drives vapour. */
   load: number;
+  flex: number;
+  flexVelocity: number;
+  previousPosition: THREE.Vector3;
+  previousQuaternion: THREE.Quaternion;
   /** Drop response: a lateral scatter target that holds until scatterUntil,
    *  and a nose-down dive until diveUntil (both absolute seconds). */
   scatterX: number;
@@ -119,7 +123,8 @@ function makeShip(seed: number, x0: number, z0: number, present: boolean): Ship 
     roll: 0,
     speed: 20,
     accel: 0,
-    load: 0,
+    load: 0, flex: 0, flexVelocity: 0,
+    previousPosition: group.position.clone(), previousQuaternion: group.quaternion.clone(),
     scatterX: 0,
     scatterUntil: -Infinity,
     diveUntil: -Infinity,
@@ -196,11 +201,11 @@ export function separateShips(ships: Ship[]): void {
       const dx = pa.x - pb.x;
       const dy = pa.y - pb.y;
       const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 >= R2 || d2 < 1e-6) continue;
-      const d = Math.sqrt(d2);
+      if (d2 >= R2) continue;
+      const d = Math.sqrt(Math.max(1e-6, d2));
       const push = (R - d) / R * SHIP_SEP_STRENGTH;
       // Mostly sideways; a little vertical so a column of planes fans out.
-      const px = (dx / d) * push;
+      const px = (Math.abs(dx) + Math.abs(dy) < 0.05 ? (i % 2 ? 1 : -1) : dx / d) * push;
       const py = (dy / d) * push * 0.5;
       a.sepX += px; a.sepY += py;
       b.sepX -= px; b.sepY -= py;
@@ -231,6 +236,8 @@ export function updateShip(
   if (ship.phase === 'dormant') return;
   const { dt, time, groundFlow, centroid, bassEnergy, beatPulse, anticipation, arrowKeys } = input;
   const p = ship.group.position;
+  ship.previousPosition.copy(p);
+  ship.previousQuaternion.copy(ship.group.quaternion);
   const leaving = ship.phase === 'leaving';
 
   // ----- wander target -----
@@ -281,7 +288,9 @@ export function updateShip(
   // damped on the current turn rate so it rolls out before the heading
   // arrives rather than sailing through it.
   const turnRate = (SHIP_TURN_G / ship.speed) * Math.tan(ship.roll);
-  const vxDes = clamp((targetX - p.x) * SHIP_LAT_GAIN, -SHIP_LAT_MAX, SHIP_LAT_MAX);
+  const wall = Math.max(0, Math.abs(p.x) - (SHIP_X_BOUND - 5)) / 5;
+  const wallSteer = ship.phase === 'active' ? -Math.sign(p.x) * wall * wall * 9 : 0;
+  const vxDes = clamp((targetX - p.x) * SHIP_LAT_GAIN + wallSteer, -SHIP_LAT_MAX, SHIP_LAT_MAX);
   const vzAir = Math.sqrt(Math.max(1, ship.speed * ship.speed - vxDes * vxDes));
   const desiredHeading = Math.atan2(-vxDes, -vzAir);
   const headingErr = wrapAngle(desiredHeading - ship.heading);
@@ -302,9 +311,13 @@ export function updateShip(
   const rightX = fwdZ;
   const rightZ = -fwdX;
   let envelope = -Infinity;
+  // A faster plane needs more terrain lead time before a ridge reaches it.
+  const lookahead = Math.max(SHIP_LOOKAHEAD_DIST, ship.speed * 0.9);
+  const gustX = terrain.noise3(p.x * 0.018, p.z * 0.018 + time * 0.035, 31) * 0.7;
+  const gustY = terrain.noise3(p.x * 0.018, p.z * 0.018 + time * 0.035, 47) * 0.25;
   for (let i = 0; i <= 4; i++) {
-    const ax = p.x + fwdX * SHIP_LOOKAHEAD_DIST * i * 0.25;
-    const az = p.z + fwdZ * SHIP_LOOKAHEAD_DIST * i * 0.25;
+    const ax = p.x + fwdX * lookahead * i * 0.25;
+    const az = p.z + fwdZ * lookahead * i * 0.25;
     for (let side = -1; side <= 1; side++) {
       const h = envelopeAt(terrain, ax + rightX * side * 2, az + rightZ * side * 2);
       if (h > envelope) envelope = h;
@@ -336,7 +349,8 @@ export function updateShip(
   // ----- airspeed command -----
   // Cruise at the ground flow (station), surge to close Z error, and let the
   // music push: bass drives the flock forward, a beat gives a nudge.
-  const surge = clamp((targetZ - p.z) * SHIP_SURGE_Z_GAIN, -SHIP_SURGE_MAX, SHIP_SURGE_MAX);
+  const zLimit = ship.phase === 'active' ? Math.max(0, p.z - SHIP_Z_MAX + 5) * 1.5 : 0;
+  const surge = clamp((targetZ - p.z) * SHIP_SURGE_Z_GAIN - zLimit, -SHIP_SURGE_MAX, SHIP_SURGE_MAX);
   let speedCmd = groundFlow + surge + bassEnergy * SHIP_SURGE_BASS + beatPulse * SHIP_SURGE_BEAT;
   // Arrivals catch up hard from behind; departures shed speed and lift
   // their nose so the flow carries them up and away.
@@ -396,6 +410,9 @@ export function updateShip(
     0, 1,
   );
   ship.load += (loadRaw - ship.load) * (1 - Math.exp(-dt / TRAIL_LOAD_SMOOTH_S));
+  const flexTarget = ship.load * 0.13 + gustY * 0.08;
+  ship.flexVelocity += ((flexTarget - ship.flex) * 55 - ship.flexVelocity * 13) * dt;
+  ship.flex = clamp(ship.flex + ship.flexVelocity * dt, -0.04, 0.18);
 
   // ----- integrate -----
   // Coordinated turn: bank → turn rate. Positive roll = left bank = heading
@@ -405,8 +422,8 @@ export function updateShip(
   // ground flow speed, exactly as it carries the terrain.
   const cosP = Math.cos(ship.pitch);
   const step = ship.speed * dt;
-  p.x += -Math.sin(ship.heading) * cosP * step;
-  p.y += Math.sin(ship.pitch) * step;
+  p.x += -Math.sin(ship.heading) * cosP * step + gustX * dt;
+  p.y += Math.sin(ship.pitch) * step + gustY * dt;
   p.z += -Math.cos(ship.heading) * cosP * step - groundFlow * dt;
 
   // ----- bounds -----

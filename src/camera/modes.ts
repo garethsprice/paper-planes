@@ -48,6 +48,7 @@ export type CameraSelection = {
   /** Number of ships currently in the flock (a prefix of the ship list);
    *  chase/cockpit modes for ships beyond this are unavailable. */
   presentShips: number;
+  availableShips: boolean[];
 };
 
 export function createCameraSelection(shipCount: number): CameraSelection {
@@ -67,13 +68,14 @@ export function createCameraSelection(shipCount: number): CameraSelection {
     recentIdxs: [],
     transitionS: CAM_BLEND_S,
     presentShips: 1,
+    availableShips: Array.from({ length: shipCount }, (_, i) => i === 0),
   };
 }
 
 /** True if the mode can be shown now — tracked modes need their ship present. */
 export function isModeAvailable(sel: CameraSelection, idx: number): boolean {
   const m = sel.modes[idx];
-  if (m.kind === 'chase' || m.kind === 'cockpit') return m.shipIdx < sel.presentShips;
+  if (m.kind === 'chase' || m.kind === 'cockpit') return sel.availableShips[m.shipIdx] === true;
   return m.kind !== 'vr-observer';
 }
 

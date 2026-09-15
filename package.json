@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
   },
   "dependencies": {
     "realtime-bpm-analyzer": "^5.0.13",
@@ -18,5 +19,8 @@
     "@vitejs/plugin-basic-ssl": "^1.2.0",
     "typescript": "^5.4.5",
     "vite": "^5.3.1"
+  },
+  "engines": {
+    "node": ">=22.18.0"
   }
 }

@@ -44,9 +44,11 @@ const FRAG = /* glsl */ `
   varying vec3 vColor;
   void main() {
     float d = length(gl_PointCoord - 0.5);
-    float a = smoothstep(0.5, 0.1, d) * vAlpha;
+    float a = (1.0 - smoothstep(0.1, 0.5, d)) * vAlpha;
     if (a < 0.002) discard;
     gl_FragColor = vec4(vColor * a, a);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 
@@ -106,7 +108,7 @@ export function createSparks(scene: THREE.Scene, terrain: Terrain): Sparks {
     for (let k = 0; k < 4; k++) {
       const ix = (Math.random() * (COLS - 1)) | 0;
       const iy = (ROWS * 0.3 + Math.random() * (ROWS * 0.7 - 1)) | 0;
-      const h = terrain.heights[iy * COLS + ix];
+      const h = terrain.heights[iy * COLS + ix] * terrain.heightMultiplier.value;
       if (h > bestH) {
         bestH = h;
         bx = (ix / (COLS - 1) - 0.5) * WIDTH;

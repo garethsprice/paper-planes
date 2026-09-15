@@ -24,6 +24,7 @@ import {
   TERRAIN_MEANDER_AMP, TERRAIN_MEANDER_WAVELENGTH, TERRAIN_CENTROID_MEANDER,
 } from '../constants.ts';
 import { sampleLogBin, type Terrain } from './terrain.ts';
+import { frequencyBin } from '../audio/features.ts';
 
 export type Landscape = {
   /** World distance the landscape has travelled — the Z axis of the noise field. */
@@ -60,11 +61,11 @@ export type LandscapeInput = {
   time: number;
   intensity: number;
   centroid: number;
+  sampleRate: number;
 };
 
-// FFT bin ranges (fftSize 1024 → 43 Hz per bin): bass 40–860 Hz, mids
-// 0.86–6.5 kHz, highs 6.5–17 kHz.
-const BAND_BINS: [number, number][] = [[1, 20], [20, 150], [150, 400]];
+// Frequency bands are converted to bins using the source sample rate.
+const BAND_HZ: [number, number][] = [[35, 250], [250, 4000], [4000, 16000]];
 
 function bandMean(bins: Uint8Array, lo: number, hi: number): number {
   let s = 0;
@@ -110,7 +111,9 @@ export function writeLandscapeRow(
 
   // ----- band energies, self-calibrated -----
   for (let b = 0; b < 3; b++) {
-    const [lo, hi] = BAND_BINS[b];
+    const [lowHz, highHz] = BAND_HZ[b];
+    const lo = Math.min(fftBins.length - 1, frequencyBin(lowHz, input.sampleRate, fftBins.length * 2));
+    const hi = Math.max(lo + 1, Math.min(fftBins.length, frequencyBin(highHz, input.sampleRate, fftBins.length * 2)));
     const raw = Math.pow(bandMean(fftBins, lo, hi), 0.8);
     ls.bandMax[b] = Math.max(raw, 0.02, ls.bandMax[b] * Math.exp(-dt / TERRAIN_BAND_MAX_MEMORY_S));
     const norm = Math.min(1, raw / ls.bandMax[b]);

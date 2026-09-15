@@ -17,6 +17,7 @@ import {
 } from '../constants.ts';
 import type { StereoState } from './stereo.ts';
 import { HybridRenderPass } from './stereo.ts';
+import { createQuality, QUALITY_LEVELS, type Quality } from './quality.ts';
 
 /** three's OutputPass (tone mapping + colour space) with a chromatic
  *  aberration fringe folded into the same fullscreen draw: each channel is
@@ -53,10 +54,18 @@ class ChromaticOutputPass extends OutputPass {
   }
 }
 
+/** EffectComposer calls setSize in physical pixels when adding or resizing passes. */
+export class ScaledBloomPass extends UnrealBloomPass {
+  scale = 1 / BLOOM_DIVISOR;
+  override setSize(width: number, height: number): void {
+    super.setSize(Math.max(1, Math.round(width * (this.scale ?? 1 / BLOOM_DIVISOR))), Math.max(1, Math.round(height * (this.scale ?? 1 / BLOOM_DIVISOR))));
+  }
+}
 export type RenderPipeline = {
+  quality: Quality;
   renderer: THREE.WebGLRenderer;
   composer: EffectComposer;
-  bloom: UnrealBloomPass;
+  bloom: ScaledBloomPass;
   output: ChromaticOutputPass;
 };
 
@@ -68,10 +77,8 @@ export function createRenderPipeline(
 ): RenderPipeline {
   const renderer = new THREE.WebGLRenderer({
     canvas,
-    // Every 2D frame goes through the composer, whose render targets are
-    // single-sampled; the default framebuffer only ever receives the
-    // output pass's fullscreen quad. A multisampled backbuffer would cost
-    // memory bandwidth and a resolve every frame for nothing.
+    // Antialias the scene render target. The default framebuffer receives
+    // only the composited fullscreen image.
     antialias: false,
     stencil: false,
     powerPreference: 'high-performance',
@@ -90,19 +97,22 @@ export function createRenderPipeline(
     window.innerWidth / BLOOM_DIVISOR,
     window.innerHeight / BLOOM_DIVISOR,
   );
-  const composer = new EffectComposer(renderer);
+  const target = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 2, stencilBuffer: false });
+  const composer = new EffectComposer(renderer, target);
   composer.addPass(new HybridRenderPass(scene, camera, stereo));
-  const bloom = new UnrealBloomPass(
+  const bloom = new ScaledBloomPass(
     bloomRes,
     0.2,  // strength — animate() rewrites each frame; this is the at-rest value
     0.32, // radius — tight; the wide 0.55 on a half-res buffer blotched
-    0.42, // threshold — only genuinely bright crests and the ships bloom
+    0.65, // threshold — only genuinely bright crests and the ships bloom
   );
   composer.addPass(bloom);
   const output = new ChromaticOutputPass();
   composer.addPass(output);
 
-  return { renderer, composer, bloom, output };
+  const pipeline = { renderer, composer, bloom, output, quality: createQuality() };
+  resizePipeline(pipeline, window.innerWidth, window.innerHeight);
+  return pipeline;
 }
 
 export type PostFxInput = {
@@ -114,6 +124,7 @@ export type PostFxInput = {
   anticipation: number;
   flash: number;
   hush: number;
+  flashIntensity: number;
 };
 
 const BASE_EXPOSURE = 0.88;
@@ -124,17 +135,18 @@ const BASE_EXPOSURE = 0.88;
  *  the seam). */
 export function updatePostFx(pipeline: RenderPipeline, input: PostFxInput): void {
   const { intensity: I, bassEnergy, dropBoost, stereoEnabled, anticipation, flash, hush } = input;
+  const visibleFlash = flash * input.flashIntensity;
   const bloomMul = stereoEnabled ? 0.4 : 1.0;
   // Restrained: at-rest 0.18, peaks around 0.5 on a drop. Glow should read
   // as a halo on the brightest crests, never a wash over the whole grid —
   // except for the flash, the one moment white is allowed.
   pipeline.bloom.strength =
-    ((0.16 + 0.06 * I) + bassEnergy * 0.10 * I + dropBoost * 0.18 + flash * MOOD_FLASH_BLOOM) * bloomMul;
+    ((0.16 + 0.06 * I) + bassEnergy * 0.10 * I + dropBoost * 0.08 + visibleFlash * MOOD_FLASH_BLOOM) * bloomMul;
   // A build withholds light; the hush withholds more; the flash gives it
   // all back for a quarter second.
   pipeline.renderer.toneMappingExposure =
     BASE_EXPOSURE * (1 - MOOD_DIM_BUILD * anticipation) * (1 - 0.3 * hush)
-    + flash * MOOD_FLASH_EXPOSURE;
+    + visibleFlash * MOOD_FLASH_EXPOSURE;
   pipeline.bloom.radius = stereoEnabled ? 0.25 : 0.32;
   // A whisper of fringing — beyond ~0.004 the stars split into RGB triplets.
   pipeline.output.amount.value = stereoEnabled
@@ -155,4 +167,20 @@ export function renderFrame(
   } else {
     pipeline.composer.render(dt);
   }
+}
+
+/** One sizing path for startup, resize, DPR changes and adaptive quality. */
+export function resizePipeline(p: RenderPipeline, width: number, height: number): void {
+  const quality = QUALITY_LEVELS[p.quality.level];
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5) * quality.pixelScale;
+  p.renderer.setPixelRatio(dpr);
+  p.renderer.setSize(width, height);
+  p.bloom.scale = quality.bloomScale / BLOOM_DIVISOR;
+  // Thin moving lines need edge coverage at every quality level.
+  const samples = 2;
+  for (const target of [p.composer.renderTarget1, p.composer.renderTarget2]) {
+    if (target.samples !== samples) { target.samples = samples; target.dispose(); }
+  }
+  p.composer.setPixelRatio(dpr);
+  p.composer.setSize(width, height);
 }

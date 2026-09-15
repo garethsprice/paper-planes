@@ -10,30 +10,63 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <canvas id="stage"></canvas>
-    <div id="invite" class="skytext" aria-live="polite">
-      <div class="invite-main">click anywhere to start the mic</div>
-      <div class="invite-sub">or drop a track on the sky</div>
-    </div>
-    <div id="ui">
-      <label class="btn">
+    <canvas id="stage" aria-label="A musical landscape with paper planes"></canvas>
+    <section id="invite" class="skytext" aria-label="Start listening">
+      <div class="invite-main">a place for your music</div>
+      <div class="invite-sub">Choose a track. Follow the light.</div>
+      <div class="source-choices">
+        <button class="btn" data-source="file">Load a track</button>
+        <button class="btn" data-source="tab">Tab audio</button>
+        <button class="btn" data-source="mic">Microphone</button>
+      </div>
+      <button class="text-btn" data-source="demo">Try a 40-second flight</button>
+      <p class="invite-sub">You can also drop an audio file here.</p>
+    </section>
+    <div id="ui" aria-label="Playback and view controls">
+      <div class="toolbar">
         <input id="file" type="file" accept="audio/*" hidden />
-        load audio
-      </label>
-      <button id="play" class="btn" disabled>play</button>
-      <button id="mic" class="btn">use mic</button>
-      <button id="tab" class="btn">use tab audio</button>
-      <button id="stereo" class="btn" title="side-by-side stereo for AR glasses">3d</button>
-      <button id="vr" class="btn" title="enter VR (Quest browser / WebXR)" style="display:none">enter vr</button>
-      <button id="lyrics" class="btn" title="lyric banners from the mic (L)">lyrics</button>
-      <button id="debug" class="btn" title="lyrics debug: live feed + sliders">debug</button>
-      <span id="status">click anywhere to start mic</span>
-      <span id="bpm">
-        <span class="dot" id="bpm-dot"></span>
-        <span class="num">— bpm</span>
-      </span>
-      <span id="dbg" class="dbg">—</span>
+        <button id="load" class="btn">Load track</button>
+        <button id="play" class="btn" disabled>Play</button>
+        <button id="stop" class="btn" disabled>Stop</button>
+        <button id="mic" class="btn">Mic</button>
+        <button id="tab" class="btn">Tab audio</button>
+        <button id="demo" class="btn">Demo</button>
+        <button id="fullscreen" class="btn" aria-label="Toggle fullscreen">Fullscreen</button>
+        <span id="bpm"><span class="dot" id="bpm-dot"></span><span class="num">— bpm</span></span>
+        <details id="settings">
+          <summary class="btn">View &amp; sound</summary>
+          <div class="settings-content">
+            <label>Camera <select id="camera" aria-label="Camera view"></select></label>
+            <button id="director" class="btn" aria-pressed="true">Automatic camera on</button>
+            <label>Camera motion <input id="motion" type="range" min="0" max="1" step="0.05" /></label>
+            <label>Flash intensity <input id="flash" type="range" min="0" max="1" step="0.05" /></label>
+            <label>Visual timing <span><input id="sync" title="Positive values advance the visuals; negative values delay them" type="range" min="-300" max="300" step="10" /><output id="sync-value">0 ms</output></span></label>
+            <label>Quality <select id="quality"><option value="high">High</option><option value="auto">Automatic</option><option value="low">Low</option></select></label>
+            <div class="settings-buttons">
+              <button id="stereo" class="btn" aria-pressed="false" title="Side-by-side stereo for AR glasses">3D glasses</button>
+              <button id="vr" class="btn" title="Enter VR" style="display:none">Enter VR</button>
+              <button id="lyrics" class="btn" aria-pressed="false">Mic lyrics off</button>
+              <button id="load-lrc" class="btn" disabled>Load lyrics (.lrc)</button>
+              <button id="clear-lrc" class="btn" disabled>Clear lyrics</button>
+              <input id="lrc" type="file" accept=".lrc,text/plain" hidden />
+            </div>
+            <p class="settings-note">Mic lyrics use your browser’s speech service. Lyric files stay on this device.</p>
+            <label class="diagnostics-label"><input id="diagnostics" type="checkbox" /> Show performance</label>
+            <button id="debug" class="btn">Speech details</button>
+            <p class="settings-note">Drag to look · C camera · V auto camera · F fullscreen · Space play/pause</p>
+          </div>
+        </details>
+      </div>
+      <div class="track-row"><span id="status" role="status">Choose your music</span>
+        <span id="transport" hidden><span id="elapsed">0:00</span><input id="seek" type="range" min="0" max="100" value="0" step="0.1" aria-label="Track position" /><span id="duration">0:00</span></span>
+      </div>
+      <span id="dbg" class="dbg" hidden>—</span>
     </div>
-    <script type="module" src="/src/main.ts"></script>
+    <section id="recovery" hidden role="alert">
+      <h1>Let’s get you back to the sky</h1>
+      <p id="recovery-message"></p>
+      <button id="retry" class="btn">Try again</button>
+    </section>
+    <script type="module" src="/src/bootstrap.ts"></script>
   </body>
 </html>

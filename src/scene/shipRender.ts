@@ -30,13 +30,17 @@ const EDGE_VERT = /* glsl */ `
   attribute vec4 iQuat;
   attribute vec3 iColor;
   attribute float iFade;
+  attribute float iFlex;
+  attribute float iLeader;
   varying vec3 vColor;
   varying float vFade;
   ${ROTATE}
   void main() {
     vColor = iColor;
     vFade = iFade;
-    vec3 world = iPos + qrot(iQuat, position);
+    vec3 paper = position;
+    paper.y += iFlex * pow(abs(paper.x) / 0.65, 2.0);
+    vec3 world = iPos + qrot(iQuat, paper);
     gl_Position = projectionMatrix * viewMatrix * vec4(world, 1.0);
   }
 `;
@@ -46,6 +50,8 @@ const EDGE_FRAG = /* glsl */ `
   void main() {
     if (vFade < 0.003) discard;
     gl_FragColor = vec4(vColor, vFade);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 
@@ -59,17 +65,27 @@ const PANEL_VERT = /* glsl */ `
   attribute vec3 iPos;
   attribute vec4 iQuat;
   attribute float iFade;
+  attribute float iFlex;
+  attribute float iLeader;
   varying vec3 vWorldPos;
+  varying float vLeader;
+  varying vec3 vLocal;
   varying float vFade;
   ${ROTATE}
   void main() {
-    vWorldPos = iPos + qrot(iQuat, position);
+    vec3 paper = position;
+    paper.y += iFlex * pow(abs(paper.x) / 0.65, 2.0);
+    vWorldPos = iPos + qrot(iQuat, paper);
+    vLeader = iLeader;
+    vLocal = position;
     vFade = iFade;
     gl_Position = projectionMatrix * viewMatrix * vec4(vWorldPos, 1.0);
   }
 `;
 const PANEL_FRAG = /* glsl */ `
   varying vec3 vWorldPos;
+  varying float vLeader;
+  varying vec3 vLocal;
   varying float vFade;
   uniform vec3 uLightDir;
   uniform vec3 uSunColor;
@@ -86,10 +102,14 @@ const PANEL_FRAG = /* glsl */ `
     float wrap = clamp(ndl * 0.6 + 0.4, 0.0, 1.0);
     float transmit = clamp(-ndl, 0.0, 1.0);
     float backlit = pow(max(dot(-v, uLightDir), 0.0), 8.0);
-    vec3 col = uBase * hemi
+    float crease = 1.0 - smoothstep(0.015, 0.09, abs(vLocal.x));
+    vec3 paperTint = mix(uBase, vec3(0.30, 0.17, 0.065), vLeader);
+    vec3 col = paperTint * hemi * (1.0 - crease * 0.3)
       + uSunColor * uSun * (wrap * 0.3 + transmit * (0.1 + backlit * 0.6));
     float alpha = uOpacity * vFade * (1.0 - backlit * uSun * 0.35);
     gl_FragColor = vec4(col, alpha);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 
@@ -97,7 +117,7 @@ export type ShipRenderer = {
   edges: THREE.LineSegments;
   panels: THREE.Mesh;
   /** Write every ship's transform, colour and fade; call after updateShip. */
-  update: (ships: Ship[], light: LightUniforms) => void;
+  update: (ships: Ship[], light: LightUniforms, alpha?: number) => void;
 };
 
 export function createShipRenderer(scene: THREE.Scene, light: LightUniforms): ShipRenderer {
@@ -106,7 +126,10 @@ export function createShipRenderer(scene: THREE.Scene, light: LightUniforms): Sh
   const iQuat = new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4);
   const iColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
   const iFade = new THREE.InstancedBufferAttribute(new Float32Array(n), 1);
-  for (const a of [iPos, iQuat, iColor, iFade]) a.setUsage(THREE.DynamicDrawUsage);
+  const iFlex = new THREE.InstancedBufferAttribute(new Float32Array(n), 1);
+  const iLeader = new THREE.InstancedBufferAttribute(new Float32Array(n), 1);
+  iLeader.setX(0, 1);
+  for (const a of [iPos, iQuat, iColor, iFade, iFlex]) a.setUsage(THREE.DynamicDrawUsage);
 
   const instanced = (index: number[]): THREE.InstancedBufferGeometry => {
     const g = new THREE.InstancedBufferGeometry();
@@ -116,6 +139,8 @@ export function createShipRenderer(scene: THREE.Scene, light: LightUniforms): Sh
     g.setAttribute('iQuat', iQuat);
     g.setAttribute('iColor', iColor);
     g.setAttribute('iFade', iFade);
+    g.setAttribute('iFlex', iFlex);
+    g.setAttribute('iLeader', iLeader);
     g.instanceCount = 0;
     return g;
   };
@@ -152,8 +177,11 @@ export function createShipRenderer(scene: THREE.Scene, light: LightUniforms): Sh
   const _up = new THREE.Vector3();
   const _c = new THREE.Color();
   const EDGE_BASE = new THREE.Color(0xeaffff);
+  const LEADER_EDGE = new THREE.Color(1.0, 0.73, 0.35);
 
-  const update = (ships: Ship[], l: LightUniforms): void => {
+  const _position = new THREE.Vector3();
+  const _quaternion = new THREE.Quaternion();
+  const update = (ships: Ship[], l: LightUniforms, alpha = 1): void => {
     const pos = iPos.array as Float32Array;
     const quat = iQuat.array as Float32Array;
     const col = iColor.array as Float32Array;
@@ -166,8 +194,9 @@ export function createShipRenderer(scene: THREE.Scene, light: LightUniforms): Sh
       const s = ships[i];
       if (s.phase === 'dormant') { fade[i] = 0; continue; }
       count = i + 1;
-      const p = s.group.position;
-      const q = s.group.quaternion;
+      const p = _position.lerpVectors(s.previousPosition, s.group.position, alpha);
+      const q = _quaternion.slerpQuaternions(s.previousQuaternion, s.group.quaternion, alpha);
+      iFlex.setX(i, s.flex);
       pos[i * 3] = p.x; pos[i * 3 + 1] = p.y; pos[i * 3 + 2] = p.z;
       quat[i * 4] = q.x; quat[i * 4 + 1] = q.y; quat[i * 4 + 2] = q.z; quat[i * 4 + 3] = q.w;
       // Edge rim light: the wing surface facing the sun brightens and warms.
@@ -175,6 +204,8 @@ export function createShipRenderer(scene: THREE.Scene, light: LightUniforms): Sh
       const facing = Math.max(0, _up.dot(lightDir) * 0.5 + 0.5);
       const k = facing * facing * sun * SUN_SHIP_RIM;
       _c.copy(EDGE_BASE).multiplyScalar(0.85 + k * 0.6).lerp(sunColor, k * 0.6);
+      if (i === 0) _c.lerp(LEADER_EDGE, 0.48).multiplyScalar(1.12);
+      else _c.multiplyScalar(0.72);
       col[i * 3] = _c.r; col[i * 3 + 1] = _c.g; col[i * 3 + 2] = _c.b;
       // group.visible is how the cockpit camera hides its own ship.
       fade[i] = s.group.visible ? s.fade : 0;
@@ -185,6 +216,7 @@ export function createShipRenderer(scene: THREE.Scene, light: LightUniforms): Sh
     iQuat.needsUpdate = true;
     iColor.needsUpdate = true;
     iFade.needsUpdate = true;
+    iFlex.needsUpdate = true;
   };
 
   return { edges, panels, update };

@@ -10,7 +10,18 @@ export default defineConfig({
   plugins: [basicSsl()],
   // 'esnext' keeps top-level await available un-transpiled. All evergreen
   // browsers support it.
-  build: { target: 'esnext' },
+  build: {
+    target: 'esnext',
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('/node_modules/three/examples/')) return 'postprocessing';
+          if (id.includes('/node_modules/three/')) return 'three';
+          if (id.includes('/node_modules/realtime-bpm-analyzer/')) return 'tempo';
+        },
+      },
+    },
+  },
   optimizeDeps: { esbuildOptions: { target: 'esnext' } },
   server: {
     host: '0.0.0.0',

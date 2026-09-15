@@ -23,9 +23,9 @@ export type KeyCallbacks = {
 export function installKeyHandlers(cb: KeyCallbacks): void {
   document.addEventListener('keydown', (e) => {
     // ignore key events fired inside form fields
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement || (e.target instanceof HTMLElement && e.target.isContentEditable)) return;
     switch (e.key.toLowerCase()) {
-      case ' ':         e.preventDefault(); cb.togglePlay(); break;
+      case ' ':         if (e.target instanceof HTMLButtonElement || (e.target instanceof HTMLElement && e.target.tagName === 'SUMMARY')) return; e.preventDefault(); cb.togglePlay(); break;
       case 'b':         cb.toggleBloom(); break;
       case 'f':         cb.toggleFullscreen(); break;
       case 'r':         cb.resetBpm(); break;

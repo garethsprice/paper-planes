@@ -19,6 +19,9 @@ import type { ModeRole } from './modes.ts';
 
 export type Director = {
   cinematicAuto: boolean;
+  reservedUntil: number;
+  holdUntil: number;
+  scheduledCue: number;
   prevBuild: number;
   prevQuiet: boolean;
   /** ms timestamp; 6-second refractory between build cuts. */
@@ -31,7 +34,7 @@ export type Director = {
 
 export function createDirector(): Director {
   return {
-    cinematicAuto: true,
+    cinematicAuto: true, reservedUntil: 0, holdUntil: 0, scheduledCue: -Infinity,
     prevBuild: 0,
     prevQuiet: false,
     lastBuildCutAt: 0,
@@ -53,6 +56,11 @@ export type DirectorContext = {
   dropFiredThisFrame: boolean;
   beatCount: number;
   bpm: number;
+  beatConfidence: number;
+  beatEdge: boolean;
+  upcomingDropIn: number;
+  upcomingCueAt: number;
+  motion: number;
   /** Scene time (s) and the rhyme memory, for shot recall. */
   time: number;
   rhyme: Rhyme;
@@ -85,7 +93,7 @@ export function runDirector(
   sel: CameraSelection,
   ctx: DirectorContext,
 ): void {
-  if (!director.cinematicAuto) return;
+  if (!director.cinematicAuto || ctx.motion < 0.05) return;
   const now = performance.now();
   if (now < director.pilotActiveUntil) {
     // Pilot in control: pin the cadence baselines so the next cut is
@@ -98,13 +106,26 @@ export function runDirector(
     director.prevQuiet = ctx.dynamics.quiet;
     return;
   }
+  if (ctx.dynamics.phase === 'anticipate') director.reservedUntil = now + 12000;
+  const revealDuration = CAM_BLEND_DROP_S / Math.max(0.4, ctx.motion);
+  if (ctx.upcomingDropIn > 0 && ctx.upcomingDropIn <= revealDuration &&
+      ctx.upcomingCueAt !== director.scheduledCue && now >= director.holdUntil) {
+    applyCut(sel, chooseShot(sel, ctx, 'drop', 'dramatic'), ctx.beatCount, ctx.upcomingDropIn);
+    director.scheduledCue = ctx.upcomingCueAt;
+    director.reservedUntil = 0;
+    director.holdUntil = now + 8000;
+    return;
+  }
+  if (now < director.holdUntil) return;
   const buildOnset = ctx.dynamics.build > 0.45 && director.prevBuild <= 0.45;
   const quietOnset = ctx.dynamics.quiet && !director.prevQuiet;
   const shotAgeMs = now - sel.modeChangedAt;
 
-  if (ctx.dropFiredThisFrame && shotAgeMs > SHOT_MIN_EVENT_MS) {
+  if (ctx.dropFiredThisFrame && (shotAgeMs > SHOT_MIN_EVENT_MS || now < director.reservedUntil)) {
     // A drop earns the one quick move we allow — still a glide, not a cut.
-    applyCut(sel, chooseShot(sel, ctx, 'drop', 'dramatic'), ctx.beatCount, CAM_BLEND_DROP_S);
+    applyCut(sel, chooseShot(sel, ctx, 'drop', 'dramatic'), ctx.beatCount, revealDuration);
+    director.reservedUntil = 0;
+    director.holdUntil = now + 8000;
   } else if (
     buildOnset &&
     now - director.lastBuildCutAt > BUILD_CUT_REFRACTORY_MS &&
@@ -125,6 +146,7 @@ export function runDirector(
     const I = ctx.dynamics.intensity;
     const beatsPerCut = ctx.dynamics.quiet ? 96 : I > 0.85 ? 32 : I > 0.5 ? 48 : 64;
     const beatReady =
+      ctx.beatConfidence >= 0.55 && ctx.beatEdge &&
       ctx.beatCount - sel.beatsAtChange >= beatsPerCut &&
       ctx.beatCount >= director.nextCutMinBeats &&
       shotAgeMs > SHOT_MIN_CADENCE_MS;
@@ -134,7 +156,7 @@ export function runDirector(
       ? (60 / ctx.bpm) * 1000 * beatsPerCut * 1.5
       : SHOT_FALLBACK_MS;
     const timeReady = shotAgeMs >= fallbackMs;
-    if (beatReady || timeReady) {
+    if ((beatReady || timeReady) && now >= director.reservedUntil) {
       const role = I > 0.3 ? 'active' : 'calm';
       applyCut(sel, chooseShot(sel, ctx, 'cadence', role), ctx.beatCount);
     }

@@ -15,24 +15,15 @@ export type StatusDeps = {
 
 export type Interaction = {
   lastAt: number;
-  pointerInWindow: boolean;
 };
 
 export function installInteractionTracking(): Interaction {
   const interaction: Interaction = {
     lastAt: performance.now(),
-    pointerInWindow: false,
   };
   const mark = () => { interaction.lastAt = performance.now(); };
   ['pointermove', 'pointerdown', 'keydown', 'wheel'].forEach((ev) => {
     document.addEventListener(ev, mark, { passive: true });
-  });
-  // While the cursor is inside the window the UI never hides; 3 s after it
-  // leaves it fades out.
-  document.body.addEventListener('pointerenter', () => { interaction.pointerInWindow = true; });
-  document.body.addEventListener('pointerleave', () => {
-    interaction.pointerInWindow = false;
-    interaction.lastAt = performance.now();
   });
   return interaction;
 }
@@ -41,7 +32,8 @@ export function installInteractionTracking(): Interaction {
  *  Returns whether the strip is idle (hidden), so per-frame readouts can be
  *  skipped while nobody can see them. */
 export function updateUiVisibility(uiEl: HTMLElement, interaction: Interaction): boolean {
-  const idle = !interaction.pointerInWindow && performance.now() - interaction.lastAt > 3000;
+  const focused = uiEl.contains(document.activeElement);
+  const idle = !focused && !uiEl.matches(':hover') && !uiEl.querySelector('details[open]') && performance.now() - interaction.lastAt > 3000;
   uiEl.classList.toggle('idle', idle);
   return idle;
 }
@@ -54,7 +46,7 @@ let lastBpmText = '';
  *  write what has actually changed: the dot's opacity is quantised to
  *  1/100 (it decays to rest within a few frames of each beat) and the text
  *  is compared before it is replaced. */
-export function updateBpmReadout(deps: StatusDeps, bpm: BpmHandle): void {
+export function updateBpmReadout(deps: StatusDeps, bpm: Pick<BpmHandle, 'bpm' | 'bpmCandidate' | 'beatPulse'>): void {
   const opacity = Math.round((0.2 + bpm.beatPulse * 0.8) * 100) / 100;
   if (opacity !== lastDotOpacity) {
     lastDotOpacity = opacity;
@@ -75,7 +67,7 @@ let dbgFrameCounter = 0;
 
 /** Smoothed frame timing for the strip: `cpuMs` is main-thread time inside
  *  the animation callback, `frameMs` the interval between frames. */
-export type FrameTiming = { cpuMs: number; frameMs: number };
+export type FrameTiming = { cpuMs: number; frameMs: number; gpuMs: number | null; p95Ms: number };
 
 /** Throttled (every 6 frames ≈ 10 Hz) debug-panel rebuild. */
 export function updateDebugPanel(
@@ -107,5 +99,5 @@ export function updateDebugPanel(
       : ` <span style="opacity:0.5">drp ${dynamics.dropCount}</span>`) +
     (formation.active ? '<span class="tag on"> FORM</span>' : '') +
     (dynamics.build > 0.3 ? '<span class="tag on"> BUILD</span>' : '') +
-    `<span class="num"> · ${timing.cpuMs.toFixed(1)}/${timing.frameMs.toFixed(1)} ms</span>`;
+    `<span class="num"> · CPU ${timing.cpuMs.toFixed(1)} ms · GPU ${timing.gpuMs?.toFixed(1) ?? "—"} ms · p95 ${timing.p95Ms.toFixed(1)} ms</span>`;
 }

@@ -107,7 +107,7 @@ export function createLyrics(onPhrase: (text: string, confidence: number) => voi
   const Ctor = w.SpeechRecognition ?? w.webkitSpeechRecognition;
   const lyrics: Lyrics = {
     supported: !!Ctor,
-    enabled: true,
+    enabled: false,
     listening: false,
     lastError: '',
     retryAt: 0,
@@ -199,6 +199,7 @@ export function createLyrics(onPhrase: (text: string, confidence: number) => voi
     r.interimResults = true;
     r.maxAlternatives = 1;
     r.onresult = (e) => {
+      if (!wantListening || !lyrics.enabled) return;
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const res = e.results[i];
         const alt = res[0];

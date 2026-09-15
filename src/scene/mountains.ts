@@ -71,6 +71,8 @@ const FRAG = /* glsl */ `
     col = mix(col, uSunColor, haze);
     float alpha = (0.55 - vFade * 0.32) * uLift + rim * 0.3;
     gl_FragColor = vec4(col, alpha);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 

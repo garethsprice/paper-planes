@@ -39,7 +39,7 @@ export const TERRAIN_BREATH_AMP = 0.07;
 export const MOOD_ANTICIPATION_RISE_S = 1.2;
 export const MOOD_ANTICIPATION_FALL_S = 2.5;
 export const MOOD_FLASH_S = 0.28;          // flash-to-white decay
-export const MOOD_AFTERGLOW_S = 2.2;       // lit sky / wide lens after the drop
+export const MOOD_AFTERGLOW_S = 4.0;       // lit sky / wide lens after the drop
 export const MOOD_HUSH_RISE_S = 3.0;       // darkness arrives gently…
 export const MOOD_HUSH_FALL_S = 0.5;       // …light returns at once
 // What anticipation withholds and the drop releases.
@@ -61,7 +61,7 @@ export const MOOD_DIVE_PITCH = 0.22;       // rad of nose-down during the dive
 // ----- wingtip vapour (see scene/trails.ts) -----
 // Vapour forms only under load: bank g-load, hard acceleration, the drop
 // dive, an arrival surging in. LOAD_ON..LOAD_FULL is the smoothstep window
-// on the smoothed load; the ribbon holds TRAIL_SAMPLES frames of history.
+// on the smoothed load; the ribbon holds TRAIL_SAMPLES simulation samples; opacity ages in seconds.
 export const TRAIL_SAMPLES = 42;
 export const TRAIL_ALPHA = 0.65;
 export const TRAIL_LOAD_ON = 0.2;
@@ -114,16 +114,10 @@ export const MOUNTAIN_PARALLAX_ENERGY = 0.9; // +90% at full energy
 export const BLOOM_DIVISOR = 2;
 
 // ----- terrain motion -----
-// The spectrogram streams toward −Z at TERRAIN_ROW_RATE grid rows per
-// second — a rate in time, not one row per frame, so a dropped frame no
-// longer slows the world. 0 locks the rate to the display's refresh rate,
-// measured at startup (render/refreshRate.ts), which keeps the pace the
-// scene was tuned at: 60 rows/s on a 60 Hz screen, 120 on a ProMotion one.
-// Set a number to fix it everywhere. Ships live in the landscape's
-// reference frame: they are advected −Z by the same flow (in u/s) and must
-// fly into it (+Z) to hold station.
+// Fixed artistic speed, independent of refresh rate. The 60 Hz simulation
+// bounds catch-up work and shares one displacement across all consumers.
 export const TERRAIN_ROW_SPACING = DEPTH / (ROWS - 1);
-export const TERRAIN_ROW_RATE = 0;
+export const TERRAIN_ROW_RATE = 60;
 
 // ----- ship flight model (kinematic coordinated flight, landscape frame) -----
 export const SHIP_X_BOUND = WIDTH * 0.40;
@@ -274,18 +268,13 @@ export const CHASE_ROLL_FOLLOW = 0.35;    // fraction of ship bank the camera ad
 // it is to the new mode's live pose over this many seconds, arcing upward so
 // it never ploughs through the grid on the way.
 export const CAM_BLEND_S = 3.2;
-export const CAM_BLEND_DROP_S = 1.8;      // drops earn a quicker move
+export const CAM_BLEND_DROP_S = 0.85;      // drops earn a quicker move
 export const CAM_BLEND_MANUAL_S = 2.0;    // C key
 export const CAM_BLEND_ARC = 3.0;         // u of upward arc at mid-transition
 
 // ----- audio gain stages feeding the BPM analyser -----
 export const BPM_GAIN_FILE = 1.0;
 export const BPM_GAIN_MIC = 8.0;
-
-// ----- dynamics (drop/quiet/build detection) -----
-export const DROP_RATIO_THRESHOLD = 1.4;   // short/mid ratio above this triggers a drop
-export const DROP_REFRACTORY_MS = 1500;
-export const QUIET_THRESHOLD = 0.05;
 
 // ----- cinematic director pacing -----
 export const SHOT_MIN_EVENT_MS = 14000;   // a drop/build/quiet may cut only after this

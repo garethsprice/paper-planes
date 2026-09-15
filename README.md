@@ -8,134 +8,90 @@ Drop in an audio file, share a tab's audio, or use your microphone. The terrain 
 
 Since I was a kid I've watched something like this in my head whenever I've listened to music: terrain unrolling out of the sound, paper planes carving through valleys, the whole landscape breathing with the kick. Headphones, eyes closed, and there it was. This is my attempt to actually see it from the outside — it's not quite the version in my head, but it's the closest I've gotten.
 
-## Features
+## Listening
 
-- **Live spectrogram, as a place** — `AnalyserNode` (`fftSize: 1024`, `smoothing: 0.8`) drives a 129×129 wireframe grid scrolling in −Z. Each row blends a spectrogram folded about the centre (bass on the spine, highs at the edges) with a synthesised landscape whose spatial scale follows the audio's frequency — bass rolls broad swells, mids carve ridged crests, highs add fine texture — sampled in world units against distance travelled so it scrolls as real geography. A slow per-column geology accumulates under loud passages and erodes in quiet, and the whole layout meanders with the spectral centroid. `TERRAIN_SPECTRUM_MIX` dials between plot and place.
-- **Audio sources** — file drop / pick, microphone, or a tab via `getDisplayMedia` (Chrome/Edge).
-- **A flock that breathes with the music** — one paper plane in quiet passages, a handful through a verse, and — exponentially, only at the top of the energy range — up to `SHIP_MAX` (28) at the peak of the song, arriving in a rush when the gap is large and ebbing away slowly. Musical energy is the mean spectrum level normalised against a ~90 s running peak, so it self-calibrates to any source; arrivals surge in from the dark behind the flock, departures throttle back, bank outward and fade as the landscape carries them away. The leader never leaves.
-- **Autopilot ships** — paper wedges with frosted panels and a glowing edge, drawn as two instanced draw calls for the whole flock (edges and panels) plus one for all wingtip vapour, with a neighbour-separation term so a dense flock keeps its spacing. They fly in the *landscape's* reference frame: the spectrogram streams past at a fixed number of grid rows per second (locked to the display's refresh rate at startup, so a dropped frame never slows the world), the planes are carried with it, and they hold station by flying into the flow at airspeed ≈ ground speed. Every motion is a physical consequence — bank gives a coordinated turn (ω = g·tan φ / v) and lateral drift, pitch gives climb/dive (dives speed up, climbs bleed), throttle surges the flock forward on bass and lets it fall back in quiet, and acceleration pitches the nose: a plane drops its nose to gain speed and flares as it sheds it. Altitude rides a slow terrain *envelope* — rising quickly onto loud passages, sinking gently after. Wander targets come from simplex noise + spectral centroid.
-- **BPM detection** — [`realtime-bpm-analyzer`](https://github.com/dlepaux/realtime-bpm-analyzer) feeds a live readout and a per-beat dot indicator. A 200 Hz biquad lowpass focuses peak detection on the kick band; mic input gets a 8× gain stage so quiet rooms still lock.
-- **Beat reactivity** — ships get a thrust kick on every detected peak; the whole landscape breathes vertically; the camera bass-pushes in; the cool→hot gradient drifts in hue.
-- **11 cameras** — five cinematic presets (eye-level, 3/4 high-side, low-left, overhead reverse, high crane), three chase cameras (one per ship), three FPV cockpit cameras (own ship hidden). There are no cuts: every shot change is a crane-style glide (≈3 s, 1.8 s on a drop) from wherever the camera is into the new mode's live pose. Presets drift gently while held; chase is a damped tether that tilts with the ship's bank. A music-driven director holds shots for 16–48 beats and moves on drops, builds and quiet onsets — never sooner than ~14 s into a shot. Press `C` to advance manually, `V` to toggle the director.
-- **Mood** — a build *withholds*: exposure dims, fog creeps in, the aurora fades, the camera pushes in and low, the flock draws into formation and climbs. The drop *releases*: a quarter-second flash to white, the sky ignites, the lens opens and the camera pulls back to a wide reveal while the flock scatters and dives. Genuine quiet lets the grid sink toward black — stars and the lone leader remain — and the first kick brings the light straight back.
-- **Wingtip vapour** — thin additive ribbons off each wingtip that form only under aerodynamic load (bank g, hard acceleration, the drop dive, an arrival surging in) and fade within a second, carried back into the flow with the landscape.
-- **Visual rhyme** — every shot change is tagged with a fingerprint of the music that led into it (energy, bass, timbre) and the event that caused it; when a later change matches a remembered one, the director returns to that shot, so the second chorus is seen from where the first was. A `rhyme` tag shows in the status strip when it fires.
-- **Horizon light** — a sky dome with a sun disc and a haze gathered on one side. Its elevation follows the song's long-term energy (a glow below the horizon in quiet, risen ~14° at full intensity) and its colour warms from ember to gold — sunrise as crescendo. The same light rim-lights the ships' sun-facing surfaces, shades their frosted panels per face (flat-shaded from screen-space derivatives: hemisphere ambient, wrapped diffuse, and transmission through faces lit from behind, so a plane crossing the glow lights up like a lantern rather than cutting a black shape), washes the far side of the grid, catches the mountain crests and tints the mountain lines with the haze where they cross the glow; the hush dims it and the drop flares the disc.
-- **Crest sparks** — on each beat a few points of light lift off the highest crests (more with intensity, a burst on a drop, none in the hush), arc gently, drift back with the landscape and fade like embers. A GPU pool integrated in the vertex shader.
-- **Lyrics in the sky** — in mic mode, the Web Speech API (Chrome; it only ever hears the microphone and sends audio to Google) listens for sung words. The gate is strict — final results only, confidence ≥ 0.5 for phrases and ≥ 0.8 for one or two words, whole words, mostly not filler — and an accepted phrase is shown at the next frisson moment (a drop, a peaking build, a rhyme recall, the light returning after a hush), or after ~5 s anyway if there's any energy in the music, as a light italic banner that fades in, drifts and dissolves; at most one every 12 s, never older than 5 s. Listening streams the mic to Google for as long as it's on, so if nothing is heard for 60 s (instrumental music, silence, or Chrome dropping the connection with a `network` error) it stops and retries after a pause that doubles each time — 5 s, 10 s, 20 s … up to about 5 min — and any result resets it; the timeout is a slider in the debug panel. The `lyrics` button or `L` toggles it; `debug` opens a panel with a live feed of everything the recogniser hears (interim guesses faintly, finals with confidence and the exact accept/reject reason) and sliders for the gate and timing, and a line saying what phrase is pending and why it's waiting.
-- **Mountain ring** — a coarse wireframe range encircling the grid at 66–112 u, peaks breathing with the song's long arc and swelling faintly on the beat, fading ring by ring toward the sky for atmospheric depth. Its height field scrolls through world Z at a fraction of the ground flow (quicker with energy), so near peaks pass while far ones crawl — the parallax of moving through a landscape at scale.
-- **Ethereal post-processing** — restrained UnrealBloomPass at half resolution (high threshold, tight radius — a halo on the brightest crests, never a wash), a whisper of radial chromatic aberration that pulses with bass, and a faint mirror world reflected below the terrain.
-- **Iridescent shimmer** — slow oil-slick hue noise in the fragment shader, BPM-driven hue offset on top, and tiny glints that drift along the crests so the grid glimmers rather than glows.
-- **Star field** — 600 points in an upper-hemisphere shell.
-- **Optional particle nebula** — toggled with `N` for added haze.
+Choose **Load track**, **Tab audio**, or **Microphone**, or try the original 40-second demo. Dropping a file starts playback. **Stop** disconnects the source, stops captured tracks and speech recognition, and returns to the source chooser.
+
+**View & sound** contains camera selection, automatic direction, camera motion, flash intensity, visual timing, quality, stereo and lyrics. Controls hide after three seconds of inactivity and remain visible while hovered, focused or open. The layout supports narrow screens and keyboard navigation.
+
+## Musical response
+
+- **Two analysis paths:** the terrain uses a smoothed 1024-point display FFT; a separate unsmoothed 2048-point analyser measures RMS and spectral flux. Frequency bands use the actual sample rate: bass 35–250 Hz, mids 250 Hz–4 kHz, highs 4–16 kHz.
+- **Beat confidence:** repeated onsets establish a tempo and phase, including eighth-note subdivisions. The BPM worklet supplies tempo candidates. The clock loses confidence when attacks disappear; a tempo estimate by itself never fabricates a beat or a bar boundary.
+- **Conservative releases:** startup establishes a baseline. A live release requires prior quiet or a sustained build, an attack, a meaningful increase in energy and an eight-second recovery interval. The scene moves through settle, anticipate, release and recover states.
+- **File lookahead:** a worker finds sustained arrivals in a locally decoded, low-rate waveform. It can prepare a reveal up to eight seconds ahead and start the camera move so it arrives with the cue. This is an energy-based heuristic, not harmonic or downbeat recognition. It skips files over 50 MB or decoded durations over 15 minutes; normal live analysis and playback still work. Replacing or stopping a source cancels pending analysis.
+- **Presentation timing:** file cues and lyric timestamps account for the audio output clock where available. The timing slider advances visuals with positive values and delays them with negative values. Live capture uses observed attacks and does not predict unheard audio.
+- **Visual rhyme:** the director retains the existing energy/timbre fingerprint memories so repeated sections can return to an earlier composition. Memories reset on source changes and seeking.
+
+## Graphics and flight
+
+- A scrolling spectrogram blended with broad bass swells, ridged midrange terrain, fine high-frequency texture and slow geological accumulation.
+- A warm, recognizable leader with a central crease. Neighboring ships share smooth gusts; aerodynamic load drives spring-based wing flex in both their panels and outlines.
+- Coordinated bank/pitch flight with speed-dependent terrain lookahead, boundary steering and separation, including coincident ships. Camera clearance, ship clearance and spark emission use the same beat-scaled terrain heights as the shader.
+- Builds gather the flock and reserve a reveal; releases scatter it and hold the wider composition. File lookahead stages arrivals before the cue. User camera changes and pilot input take precedence.
+- A major/minor grid: nearby detail remains visible while minor lines fade with distance. The mountain ring, horizon light, stars, crest sparks and restrained mirror create depth.
+- Vapour forms under load as tapered, camera-facing ribbons and fades over 0.7 seconds.
+
+### Time and render quality
+
+Physics runs at a fixed **60 steps per second**, with interpolated ship and camera poses between steps. Terrain flow is always **60 rows per second**, independent of screen refresh. Catch-up is bounded to 100 ms per render callback; all simulation consumers advance together after a stall.
+
+High is the default quality. Every quality level preserves 2× MSAA in the scene render target. Bright terrain rows follow the scrolling history, keeping the grid continuous across simulation steps. Bloom owns its resolution scaling, so adding it to the composer and resizing use the same physical-pixel calculation. Tone mapping and output conversion also work in the direct-render XR path.
+
+Optional **Automatic** quality reduces reflections, fine detail and bloom resolution first, then lowers pixel density under sustained load. It waits for a longer stable interval before restoring quality. **High** keeps full detail; **Low** offers a lighter manual setting. Legacy saved Automatic defaults migrate to High; newly selected Automatic settings are remembered. **Show performance** exposes CPU submission time, GPU render time when timer queries are supported, and the 95th percentile of recent frame intervals. These are separate measurements; unavailable GPU timing displays a dash.
+
+A recovery screen handles graphics initialization failure and context loss. Context loss stops playback/capture and the animation loop. **Try again** reloads the app.
+
+## Lyrics and comfort
+
+- **Mic lyrics** are off by default and only listen while the microphone source is active. Browser speech recognition may send audio to the browser vendor’s service. Switching sources or stopping ends recognition; late results are ignored.
+- **Load lyrics (.lrc)** uses local timestamped text. Multiple timestamps, fractional seconds and the `[offset:...]` field are supported. Lyrics follow playback and seeking; **Clear lyrics** removes them.
+- The system’s reduced-motion preference starts with automatic camera motion and flashes off. You can adjust the sliders for the current experience. Settings are saved locally when storage is available.
+- WebXR uses a stationary observer anchor and disables automatic camera changes while presenting. Side-by-side stereo remains available for glasses. Headset comfort and target-device performance should be checked on physical hardware.
 
 ## Controls
 
-| Key | Action |
-|-----|--------|
-| **drag canvas** | nudge the orbit in preset views (relaxes back over ~25 s) |
-| **drop audio file** | load and play |
-| **space** | play / pause |
-| **C** | next camera (cinematic preset → chase ships → cockpit ships; tracked views only for ships currently in the flock) |
-| **V** | toggle cinematic auto-advance |
-| **arrows** | (chase / cockpit only) joystick — left/right yaw, up/down pitch |
-| **B** | toggle bloom |
-| **N** | toggle particle nebula |
-| **L** | toggle lyric banners (mic mode, Chrome) |
-| **3** | toggle side-by-side stereo (for AR glasses that split the screen) |
-| **[** / **]** | nudge stereo eye separation |
-| **enter vr** | (button, shown only when WebXR is supported) immersive 360° stereo on Quest browser — head rotation looks around the scene from a fixed scenic anchor; cinematic auto-cycle and post-processing pause while presenting |
-| **F** | fullscreen |
-| **R** | reset BPM lock |
+| Control | Action |
+|---|---|
+| Drag the scene | Adjust a preset camera |
+| Space | Play / pause a file |
+| C / camera menu | Next / selected camera |
+| V | Toggle automatic camera |
+| Arrow keys | Pilot a ship in chase or cockpit view |
+| F | Fullscreen |
+| B | Toggle bloom |
+| N | Toggle particle nebula |
+| L | Toggle microphone lyric recognition |
+| 3 | Toggle side-by-side stereo |
+| [ / ] | Adjust stereo eye separation |
+| R | Reset tempo and beat confidence |
 
-The UI strip auto-hides after 3 seconds of inactivity; move the mouse to bring it back.
+## Development
 
-## Quick start
+Use **Node.js 22.18 or newer**.
 
 ```bash
-make install   # npm install
-make serve     # serves on https://0.0.0.0:<random-free-port>
+npm ci
+npm run dev     # HTTPS; accepts microphone/tab capture on the LAN
+npm test        # focused timing, routing, physics and rendering regressions
+npm run build   # TypeScript checking + production assets
 ```
 
-The dev server uses a self-signed certificate (via `@vitejs/plugin-basic-ssl`) because `navigator.mediaDevices` requires a secure context — accept the browser warning once and the mic works on any LAN host.
+The local HTTPS certificate is self-signed. `make serve` chooses a free port; `make build` and `make test` run the same checks as the npm scripts. Production assets use a relative base path for subdirectory hosting.
 
-`make build` produces a static `dist/` for deployment. `make preview` serves the production build.
-
-## Deployment
-
-A GitHub Actions workflow (`.github/workflows/deploy.yml`) automatically builds and deploys to GitHub Pages on every push to `main`. To enable:
-
-1. Push the repo to GitHub.
-2. **Settings → Pages → Source: GitHub Actions**.
-3. Push to `main` (or run the workflow manually). Site goes live at `https://<user>.github.io/<repo>/`.
-
-`vite.config.ts` uses `base: './'` so the build works under any subdirectory — no need to hardcode the repo name.
-
-## Stack
-
-- TypeScript + Vite
-- [three.js](https://threejs.org/) (WebGL2, `LineSegments` + `ShaderMaterial` + `EffectComposer`)
-- [`simplex-noise`](https://www.npmjs.com/package/simplex-noise) for organic ship-wander targets
-- [`realtime-bpm-analyzer`](https://www.npmjs.com/package/realtime-bpm-analyzer) for live BPM lock
+GitHub Actions runs tests and builds before deploying pushes to `main` to GitHub Pages. Configure **Settings → Pages → Source: GitHub Actions** to enable deployment.
 
 ## Code map
 
-`main.ts` is now a thin orchestrator (~400 lines) that wires modules together and runs the per-frame loop. Each module exports an `init`/factory function returning a POJO handle, and an `update(handle, frame)` (or similar) for per-frame work. The `Frame` object in `src/frame.ts` is the per-frame context that subsystems read/write.
+| Area | Files |
+|---|---|
+| Startup and orchestration | `src/bootstrap.ts`, `src/main.ts` |
+| Sources and musical features | `src/audio/sources.ts`, `features.ts`, `analyser.ts`, `bpm.ts`, `beatClock.ts`, `dynamics.ts` |
+| File cues and lyrics | `src/audio/track.ts`, `track.worker.ts`, `trackFeatures.ts`, `lrc.ts`, `lyrics.ts`, `demo.ts` |
+| Simulation and rendering | `src/render/simulation.ts`, `quality.ts`, `pipeline.ts`, `stereo.ts` |
+| Scene and flight | `src/scene/terrain.ts`, `landscape.ts`, `ship.ts`, `shipRender.ts`, `flock.ts`, `trails.ts`, `mood.ts` |
+| Cinematography | `src/camera/director.ts`, `update.ts`, `modes.ts`, `rhyme.ts`, `orbit.ts` |
+| UI and preferences | `src/ui/`, `src/input/keys.ts`, `index.html`, `src/style.css` |
+| Regression checks | `tests/*.test.mjs` |
 
-```
-src/
-├── main.ts            bootstrap + animation loop
-├── constants.ts       all numeric tunables (grid, ship, audio, camera)
-├── frame.ts           per-frame Frame type
-│
-├── scene/
-│   ├── core.ts        scene, fog, master camera, shared uniforms
-│   ├── terrain.ts     line-grid spectrogram + shaders + bilerpHeight + coarse envelope
-│   ├── landscape.ts   front-row synthesis: folded spectrum + band-scale noise + geology
-│   ├── stars.ts       full-sphere star field
-│   ├── nebula.ts      spherical particle nebula
-│   ├── ship.ts        Ship type, kinematic flight model, formation, separation
-│   ├── shipRender.ts  instanced edges + lit panels for the whole flock
-│   ├── flock.ts       music-energy → flock size; arrivals and departures
-│   ├── mood.ts        anticipation / flash / afterglow / hush scalars
-│   ├── trails.ts      wingtip vapour ribbons under load
-│   ├── sky.ts         sky dome + horizon light
-│   ├── sparks.ts      beat-driven crest sparks (GPU pool)
-│   └── mountains.ts   distant wireframe range for scale
-│
-├── audio/
-│   ├── sources.ts     AudioContext + analyser + file/mic/tab attach
-│   ├── analyser.ts    per-frame fft → bass/level/centroid extraction
-│   ├── bpm.ts         realtime-bpm-analyzer wiring + beat events
-│   ├── dynamics.ts    short/mid/long EMAs → intensity/build/quiet/drops
-│   └── lyrics.ts      Web Speech API capture with a strict certainty gate
-│
-├── camera/
-│   ├── modes.ts       CamMode union, role pools, pickCinematicMode
-│   ├── orbit.ts       mouse-drag spring physics for preset cams
-│   ├── update.ts      per-frame switch over the active mode
-│   ├── director.ts    music-driven cuts + pilot-extension override
-│   └── rhyme.ts       section fingerprints → remembered shots
-│
-├── render/
-│   ├── pipeline.ts    renderer + composer + bloom + chromatic + post-fx
-│   └── stereo.ts      StereoCamera + HybridRenderPass for AR-glasses SBS
-│
-├── xr/
-│   └── session.ts     WebXR Quest session lifecycle
-│
-├── input/
-│   └── keys.ts        keyboard shortcuts + arrow-key joystick state
-│
-└── ui/
-    ├── dom.ts         cached DOM element refs
-    └── status.ts      BPM readout, debug panel, UI auto-hide
-```
-
-## Browser support
-
-- **Chrome / Edge** — fully supported (mic, tab audio, all post passes).
-- **Firefox** — supported except `getDisplayMedia({ audio: true })`; mic and file input still work.
-- **Safari** — supported with caveats: `getDisplayMedia` audio support is limited.
-
-All audio sources require a user gesture to start (browser autoplay policy). Click anywhere on the canvas after page load to grant mic access if you want the default flow.
+Chrome/Edge support the full source flow. Tab-audio capture and speech recognition depend on browser/platform support. File playback works independently of speech recognition and offline analysis.

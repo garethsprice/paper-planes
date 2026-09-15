@@ -46,6 +46,7 @@ export type CameraRig = {
   desired: Pose;
   /** Seconds elapsed in the current blend; ≥ blendDur means "arrived". */
   blendT: number;
+  blendStartedAt: number;
   blendDur: number;
   /** Mode index last frame; a change restarts the blend. */
   lastModeIdx: number;
@@ -59,7 +60,7 @@ export function createCameraRig(): CameraRig {
     pose: makePose(),
     from: makePose(),
     desired: makePose(),
-    blendT: Infinity,
+    blendT: Infinity, blendStartedAt: 0,
     blendDur: 1,
     lastModeIdx: -1,
     chasePos: new THREE.Vector3(),
@@ -75,6 +76,7 @@ export type CameraUpdateInput = {
   time: number;
   /** 0..1 build anticipation — presets creep in and low, released at the drop. */
   anticipation: number;
+  motion: number;
   /** Terrain height at a world XZ — keeps the camera above the grid. */
   terrainHeightAt: (x: number, z: number) => number;
 };
@@ -119,7 +121,7 @@ export function updateCamera(
     const p = camMode.preset;
     // Slow ambient drift keeps a held shot alive; the phase is offset per
     // preset so two consecutive shots never drift in step.
-    const drift = Math.sin(input.time * CAM_DRIFT_RATE + sel.currentIdx * 1.7) * CAM_DRIFT_YAW;
+    const drift = Math.sin(input.time * CAM_DRIFT_RATE + sel.currentIdx * 1.7) * CAM_DRIFT_YAW * input.motion;
     // Shortest-path yaw so a preset on the far side is reached by the
     // nearer sweep — never a full wrap-around.
     const wantYaw = p.yaw + drift + orbit.dragYaw;
@@ -138,12 +140,12 @@ export function updateCamera(
     // Radius/height dolly slowly toward the preset. Bass pushes in by a
     // fraction of a unit, builds pull back and rise — all on the slow ease.
     const dollyLerp = 1 - Math.exp(-CAM_DOLLY_LERP * input.dt);
-    const breathe = Math.sin(input.time * 0.05 + sel.currentIdx) * 0.8;
+    const breathe = Math.sin(input.time * 0.05 + sel.currentIdx) * 0.8 * input.motion;
     // A build draws the camera in and down toward the grid — the withheld
     // wide view is what the drop's pull-back releases.
-    const targetRadius = p.radius + breathe - input.bassEnergy * 0.8 * input.intensity
-      - input.anticipation * MOOD_CAM_PUSH;
-    const targetHeight = Math.max(3, p.height - input.anticipation * MOOD_CAM_LOWER);
+    const targetRadius = p.radius + breathe - input.bassEnergy * 0.8 * input.intensity * input.motion
+      - input.anticipation * MOOD_CAM_PUSH * input.motion;
+    const targetHeight = Math.max(3, p.height - input.anticipation * MOOD_CAM_LOWER * input.motion);
     orbit.camRadius += (targetRadius - orbit.camRadius) * dollyLerp;
     orbit.camHeight += (targetHeight - orbit.camHeight) * dollyLerp;
     d.pos.set(
@@ -184,7 +186,7 @@ export function updateCamera(
     }
     d.pos.copy(rig.chasePos);
     d.look.copy(rig.chaseLook);
-    d.roll = ship.roll * CHASE_ROLL_FOLLOW;
+    d.roll = ship.roll * CHASE_ROLL_FOLLOW * input.motion;
   } else {
     // Cockpit: locked to the ship's nose, looking along the flight path and
     // rolling with the wings. Hide own ship.
@@ -197,7 +199,7 @@ export function updateCamera(
     const fwdZ = -Math.cos(ship.heading) * cosP;
     d.pos.set(sp.x + fwdX * 0.3, sp.y + 0.05 + fwdY * 0.3, sp.z + fwdZ * 0.3);
     d.look.set(sp.x + fwdX * 12, sp.y + 0.05 + fwdY * 12, sp.z + fwdZ * 12);
-    d.roll = ship.roll;
+    d.roll = ship.roll * input.motion;
   }
 
   // ----- 2. blend from the previous pose into the live one -----
@@ -206,9 +208,11 @@ export function updateCamera(
     rig.from.look.copy(rig.pose.look);
     rig.from.roll = rig.pose.roll;
     rig.blendT = 0;
+    rig.blendStartedAt = sel.modeChangedAt;
     rig.blendDur = Math.max(0.05, sel.transitionS);
   }
-  rig.blendT += input.dt;
+  // Reveal durations use presentation time even when physics catch-up is bounded.
+  if (rig.blendT !== Infinity) rig.blendT = Math.max(0, (performance.now() - rig.blendStartedAt) / 1000);
   const out = rig.pose;
   if (rig.blendT >= rig.blendDur) {
     out.pos.copy(d.pos);

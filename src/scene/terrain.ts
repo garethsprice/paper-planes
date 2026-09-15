@@ -19,9 +19,10 @@ const TERRAIN_VERTEX_SHADER = /* glsl */ `
   void main() {
     vec3 p = vec3(position.x, position.y * uHeightMul, position.z);
     vHeight = p.y;
-    vWorldXZ = vec2(position.x, position.z); // grid has no x/z transform — local == world
+    vec3 world = (modelMatrix * vec4(p, 1.0)).xyz;
+    vWorldXZ = world.xz; // include the sub-row scroll so shading does not jump on a row shift
     // rowAge: 0 at front (newest) → 1 at back (oldest)
-    vRowAge = clamp((uDepthHalf - p.z) / (uDepthHalf * 2.0), 0.0, 1.0);
+    vRowAge = clamp((uDepthHalf - world.z) / (uDepthHalf * 2.0), 0.0, 1.0);
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
     vViewDist = -mv.z;
     gl_Position = projectionMatrix * mv;
@@ -43,6 +44,8 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
   uniform float uAuroraIntensity;
   uniform float uDepthHalf;
   uniform float uDim;
+  uniform float uMinor;
+  uniform float uDetail;
   uniform vec3 uLightDir;
   uniform vec3 uSunColor;
   uniform float uSun;
@@ -132,15 +135,21 @@ const TERRAIN_FRAGMENT_SHADER = /* glsl */ `
     // Distance fog, row age and the hush all thin the line out rather than
     // darkening it, so the grid disappears into what lies behind it.
     float fogF = smoothstep(uFogNear, uFogFar, vViewDist);
-    float alpha = uOpacity * ageFade * (1.0 - fogF) * uDim;
+    float detailFade = mix(1.0, (1.0 - smoothstep(8.0, 34.0, vViewDist)) * uDetail * 0.6, uMinor);
+    float alpha = uOpacity * ageFade * (1.0 - fogF) * uDim * detailFade;
+    if (alpha < 0.008) discard;
 
     gl_FragColor = vec4(col, alpha);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 
 export type Terrain = {
   mesh: THREE.LineSegments;
   mirror: THREE.LineSegments;
+  detail: THREE.LineSegments;
+  heightMultiplier: { value: number };
   mirrorMaterial: THREE.ShaderMaterial;
   geometry: THREE.BufferGeometry;
   posAttr: THREE.BufferAttribute;
@@ -156,6 +165,10 @@ export type Terrain = {
   envRows: number;
   /** World-Z offset of the grid this frame (see setFlowOffset). */
   zOffset: number;
+  /** Four precomputed index layouts keep major rows attached to scrolling history. */
+  rowPhase: number;
+  lineIndices: THREE.BufferAttribute[];
+  detailIndices: THREE.BufferAttribute[];
 };
 
 export function createTerrain(core: SceneCore): Terrain {
@@ -171,30 +184,40 @@ export function createTerrain(core: SceneCore): Terrain {
     }
   }
 
-  // Edge index buffer — horizontal (along freq axis) + vertical (time axis)
-  const lineIndex: number[] = [];
-  for (let iy = 0; iy < ROWS; iy++) {
-    for (let ix = 0; ix < COLS - 1; ix++) {
-      lineIndex.push(iy * COLS + ix, iy * COLS + ix + 1);
+  // A row moves to the preceding slot when history shifts. Rotate among
+  // four precomputed layouts so its major/minor identity moves with it.
+  // No index arrays need to be rebuilt or uploaded after their first use.
+  const lineIndices: THREE.BufferAttribute[] = [];
+  const detailIndices: THREE.BufferAttribute[] = [];
+  for (let phase = 0; phase < 4; phase++) {
+    const lineIndex: number[] = [];
+    const detailIndex: number[] = [];
+    for (let iy = 0; iy < ROWS; iy++) {
+      for (let ix = 0; ix < COLS - 1; ix++) {
+        ((iy + phase) % 4 === 0 ? lineIndex : detailIndex).push(iy * COLS + ix, iy * COLS + ix + 1);
+      }
     }
-  }
-  for (let ix = 0; ix < COLS; ix++) {
-    for (let iy = 0; iy < ROWS - 1; iy++) {
-      lineIndex.push(iy * COLS + ix, (iy + 1) * COLS + ix);
+    for (let ix = 0; ix < COLS; ix++) {
+      for (let iy = 0; iy < ROWS - 1; iy++) {
+        (ix % 4 === 0 ? lineIndex : detailIndex).push(iy * COLS + ix, (iy + 1) * COLS + ix);
+      }
     }
+    lineIndices.push(new THREE.Uint16BufferAttribute(lineIndex, 1));
+    detailIndices.push(new THREE.Uint16BufferAttribute(detailIndex, 1));
   }
 
   const geometry = new THREE.BufferGeometry();
   const posAttr = new THREE.BufferAttribute(positions, 3);
   posAttr.setUsage(THREE.DynamicDrawUsage);
   geometry.setAttribute('position', posAttr);
-  geometry.setIndex(lineIndex);
-  geometry.computeBoundingSphere();
+  geometry.setIndex(lineIndices[0]);
+  geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 7, 0), 42);
 
   // Material reuses sharedUniforms by reference + adds its own uOpacity.
   const mainUniforms = {
     ...core.uniforms,
-    uOpacity: { value: 1.0 },
+    uOpacity: { value: 0.85 },
+    uMinor: { value: 0 },
   } as SharedUniforms & { uOpacity: { value: number } };
 
   const material = new THREE.ShaderMaterial({
@@ -206,7 +229,7 @@ export function createTerrain(core: SceneCore): Terrain {
 
   // Mirror world: same geometry/shader, flipped Y, dim and transparent.
   const mirrorMaterial = new THREE.ShaderMaterial({
-    uniforms: { ...core.uniforms, uOpacity: { value: 0.10 } },
+    uniforms: { ...core.uniforms, uOpacity: { value: 0.10 }, uMinor: { value: 0 } },
     vertexShader: TERRAIN_VERTEX_SHADER,
     fragmentShader: TERRAIN_FRAGMENT_SHADER,
     transparent: true,
@@ -215,6 +238,16 @@ export function createTerrain(core: SceneCore): Terrain {
 
   const mesh = new THREE.LineSegments(geometry, material);
   core.scene.add(mesh);
+  const detailGeometry = new THREE.BufferGeometry();
+  detailGeometry.setAttribute('position', posAttr);
+  detailGeometry.setIndex(detailIndices[0]);
+  detailGeometry.boundingSphere = geometry.boundingSphere;
+  const detail = new THREE.LineSegments(detailGeometry, new THREE.ShaderMaterial({
+    uniforms: { ...core.uniforms, uOpacity: { value: 0.85 }, uMinor: { value: 1 } },
+    vertexShader: TERRAIN_VERTEX_SHADER, fragmentShader: TERRAIN_FRAGMENT_SHADER,
+    transparent: true, depthWrite: false,
+  }));
+  core.scene.add(detail);
 
   const mirror = new THREE.LineSegments(geometry, mirrorMaterial);
   mirror.scale.y = -1; // reflects through the y=0 plane
@@ -235,6 +268,7 @@ export function createTerrain(core: SceneCore): Terrain {
 
   return {
     mesh,
+    detail, heightMultiplier: core.uniforms.uHeightMul,
     mirror,
     mirrorMaterial,
     geometry,
@@ -246,12 +280,23 @@ export function createTerrain(core: SceneCore): Terrain {
     envCols,
     envRows,
     zOffset: 0,
+    rowPhase: 0, lineIndices, detailIndices,
   };
+}
+
+/** Move history and its line emphasis together at each whole-row boundary. */
+export function shiftTerrainRows(terrain: Terrain, rows: number): void {
+  if (rows <= 0) return;
+  terrain.heights.copyWithin(0, COLS * rows);
+  terrain.rowPhase = (terrain.rowPhase + rows) % terrain.lineIndices.length;
+  terrain.geometry.setIndex(terrain.lineIndices[terrain.rowPhase]);
+  terrain.detail.geometry.setIndex(terrain.detailIndices[terrain.rowPhase]);
 }
 
 /**
  * Slide the grid by the fraction of a row the flow has advanced since the
- * last whole-row shift (0 ≤ frac < 1). The data only moves in whole rows;
+ * last whole-row shift. Rendering may use a negative fraction to interpolate
+ * one simulation step behind. The data only moves in whole rows;
  * this sub-row offset makes the motion continuous at any frame rate — on a
  * display faster than the row rate the grid glides between shifts instead
  * of stepping. Height lookups take the offset into account.
@@ -261,6 +306,7 @@ export function setFlowOffset(terrain: Terrain, frac: number): void {
   terrain.zOffset = z;
   terrain.mesh.position.z = z;
   terrain.mirror.position.z = z;
+  terrain.detail.position.z = z;
 }
 
 /** Rebuild the coarse envelope from the fine heights (call once per frame,
@@ -294,7 +340,7 @@ export function envelopeAt(terrain: Terrain, wx: number, wz: number): number {
   const fz = ((wz - terrain.zOffset) / DEPTH + 0.5) * (ROWS - 1) / ENVELOPE_CELL;
   const cx = Math.max(0, Math.min(envCols - 1, fx | 0));
   const cz = Math.max(0, Math.min(envRows - 1, fz | 0));
-  return envelope[cz * envCols + cx];
+  return envelope[cz * envCols + cx] * terrain.heightMultiplier.value;
 }
 
 /** Bilinear height sample at world XZ — used by ship altitude tracking. */
@@ -315,7 +361,7 @@ export function bilerpHeight(terrain: Terrain, wx: number, wz: number): number {
     h10 * tx * (1 - tz) +
     h01 * (1 - tx) * tz +
     h11 * tx * tz
-  );
+  ) * terrain.heightMultiplier.value;
 }
 
 /** Linear interpolation between adjacent FFT bins (for log-spaced sampling). */

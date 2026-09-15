@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import {
-  COLS, ROWS, BLOOM_DIVISOR, TERRAIN_ROW_SPACING, TERRAIN_ROW_RATE, CAM_BLEND_MANUAL_S,
+  TERRAIN_ROW_SPACING, TERRAIN_ROW_RATE, CAM_BLEND_MANUAL_S,
   TERRAIN_BREATH_ATTACK, TERRAIN_BREATH_RELEASE, TERRAIN_BREATH_AMP,
   MOOD_FOG_BUILD, MOOD_DIM_HUSH, MOOD_FOV_AFTERGLOW, MOOD_SCATTER_X,
   MOUNTAIN_PARALLAX, MOUNTAIN_PARALLAX_ENERGY,
@@ -9,8 +9,15 @@ import {
   SUN_INTENSITY_MIN, SUN_HUSH_DIM,
 } from './constants.ts';
 import { createStereoState } from './render/stereo.ts';
-import { createRenderPipeline, updatePostFx, renderFrame } from './render/pipeline.ts';
-import { measureRefreshRate, createRateCalibrator } from './render/refreshRate.ts';
+import { createRenderPipeline, updatePostFx, renderFrame, resizePipeline } from './render/pipeline.ts';
+import { createSimulationClock, SIMULATION_STEP } from './render/simulation.ts';
+import { createFrameMetrics, createGpuTimer, updateQuality, QUALITY_LEVELS } from './render/quality.ts';
+import { loadPreferences, savePreferences } from './ui/preferences.ts';
+import { createBeatClock, updateBeatClock, presentationTime } from './audio/beatClock.ts';
+import { createTrackAnalysis } from './audio/track.ts';
+import { upcomingCue } from './audio/trackFeatures.ts';
+import { parseLrc, lyricAt, type LyricLine } from './audio/lrc.ts';
+import { createDemoFile } from './audio/demo.ts';
 import { installXr } from './xr/session.ts';
 import { arrowKeys, installKeyHandlers } from './input/keys.ts';
 import {
@@ -19,7 +26,7 @@ import {
 import { dom } from './ui/dom.ts';
 import { createFrame } from './frame.ts';
 import { createSceneCore } from './scene/core.ts';
-import { createTerrain, bilerpHeight, updateEnvelope, setFlowOffset } from './scene/terrain.ts';
+import { createTerrain, bilerpHeight, updateEnvelope, setFlowOffset, shiftTerrainRows } from './scene/terrain.ts';
 import { createStars } from './scene/stars.ts';
 import { createNebula } from './scene/nebula.ts';
 import { createShips, updateShip, scatterShip, separateShips, type ShipUpdateInput } from './scene/ship.ts';
@@ -36,12 +43,12 @@ import { createDebugPanel } from './ui/debugPanel.ts';
 import { lyricsSettings } from './audio/lyrics.ts';
 import { createFlock, updateFlock, type FlockInput } from './scene/flock.ts';
 import {
-  ensureAudio, getAudio, attachStream, loadAudioFile,
+  ensureAudio, getAudio, attachStream, loadAudioFile, disconnectCurrent,
   type AudioState,
 } from './audio/sources.ts';
-import { createBpmHandle, ensureBpm, resetBpm } from './audio/bpm.ts';
-import { createDynamics, updateDynamics, decayDynamics } from './audio/dynamics.ts';
-import { extractAudio } from './audio/analyser.ts';
+import { createBpmHandle, resetBpm } from './audio/bpm.ts';
+import { createDynamics, updateDynamics, decayDynamics, releaseDynamics } from './audio/dynamics.ts';
+import { extractAudio, type AudioSnapshot } from './audio/analyser.ts';
 import {
   createCameraSelection, applyCut, trackedShipIdx as getTrackedShipIdx,
   nextAvailableMode, pickCinematicMode,
@@ -51,6 +58,8 @@ import { createDirector, runDirector, bumpPilotControl } from './camera/director
 import { createRhyme, updateRhyme } from './camera/rhyme.ts';
 import { updateCamera, createCameraRig, type CameraUpdateInput } from './camera/update.ts';
 
+const preferences = loadPreferences();
+const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const { canvas, fileInput, playBtn, micBtn, tabBtn, stereoBtn, uiEl, statusEl, bpmNumEl, bpmDotEl, dbgEl, lyricsBtn, debugBtn } = dom;
 
 // ----- three.js core (scene, fog, camera, shared uniform pool) -----
@@ -66,6 +75,9 @@ const { scene, camera, uniforms } = sceneCore;
 const stereo = createStereoState();
 const pipeline = createRenderPipeline(canvas, scene, camera, stereo);
 const { renderer } = pipeline;
+const gpuTimer = createGpuTimer(renderer.getContext() as WebGL2RenderingContext);
+const timing = createFrameMetrics();
+const simulation = createSimulationClock();
 
 // ----- terrain (line-grid spectrogram) + mirror reflection + scene props -----
 const terrain = createTerrain(sceneCore);
@@ -117,6 +129,7 @@ function tryShowLyric(force: boolean): void {
   pendingLyric = null;
 }
 const lyrics = createLyrics((text) => {
+  if (getAudio()?.kind !== 'mic' || !lyrics.enabled) return;
   pendingLyric = { text, at: sceneTime };
   tryShowLyric(false);
 });
@@ -124,16 +137,19 @@ const debugPanel = createDebugPanel((text) => banner.show(text));
 function setLyricsEnabled(on: boolean): void {
   if (!lyrics.supported) { statusEl.textContent = 'lyrics: speech recognition unavailable'; return; }
   lyrics.enabled = on;
-  if (on) lyrics.start(); else lyrics.stop();
+  if (on && getAudio()?.kind === 'mic') lyrics.start(); else lyrics.stop();
+  if (!on) { pendingLyric = null; if (getAudio()?.kind === 'mic') banner.clear(); }
   lyricsBtn.classList.toggle('on', on);
-  lyricsBtn.textContent = on ? 'lyrics on' : 'lyrics off';
+  lyricsBtn.textContent = on ? 'Mic lyrics on' : 'Mic lyrics off';
+  lyricsBtn.setAttribute('aria-pressed', String(on));
   statusEl.textContent = `lyrics ${on ? 'on' : 'off'}`;
 }
 lyricsBtn.classList.toggle('on', lyrics.enabled && lyrics.supported);
-lyricsBtn.textContent = lyrics.supported ? 'lyrics on' : 'lyrics n/a';
+lyricsBtn.textContent = lyrics.supported ? 'Mic lyrics off' : 'Mic lyrics unavailable';
+lyricsBtn.disabled = !lyrics.supported;
 lyricsBtn.addEventListener('click', () => setLyricsEnabled(!lyrics.enabled));
 debugBtn.addEventListener('click', () => debugPanel.toggle());
-let lastBeatPulse = 0;
+
 let lastAnticipation = 0;
 let lastHush = 0;
 let sunArc = 0.3; // very slow long-term energy: drives the light's elevation and warmth
@@ -160,112 +176,166 @@ const trails = createTrails(scene);
 const frame = createFrame();
 const bpmHandle = createBpmHandle();
 const dynamics = createDynamics();
+const beatClock = createBeatClock();
+const bpmReadout = { bpm: 0, bpmCandidate: 0, beatPulse: 0 };
+const trackAnalysis = createTrackAnalysis();
+let lyricLines: LyricLine[] = [];
+let shownLyricIndex = -1;
+let previousTrackTime = 0;
+let sourceRequest = 0;
+const onsetTimes: number[] = [];
+let audioSnap: AudioSnapshot = { fftBins: null, peakLevel: 0, onset: false, rms: 0 };
+let audioTime = 0;
 let bassEnergy = 0;     // populated each frame from extractAudio (kept for orbit camera bass impulse)
 
-function audio(): AudioState { return ensureAudio(); }
-
-// Wire AudioElement events that need handler-side state
-audio().audioEl.addEventListener('ended', () => {
-  playBtn.textContent = 'play';
-});
-
-function loadFile(f: File): void {
-  const a = audio();
-  loadAudioFile(a, bpmHandle, f);
-  ensureBpm(bpmHandle, a.ctx);
-  playBtn.disabled = false;
-  playBtn.textContent = 'play';
-  statusEl.textContent = f.name;
-  dismissInvite();
+let audioEventsInstalled = false;
+function audio(): AudioState {
+  const a = ensureAudio();
+  if (!audioEventsInstalled) {
+    audioEventsInstalled = true;
+    a.audioEl.addEventListener('play', () => { resetMusic(); playBtn.textContent = 'Pause'; });
+    a.audioEl.addEventListener('pause', () => { playBtn.textContent = 'Play'; });
+    a.audioEl.addEventListener('ended', () => { playBtn.textContent = 'Play'; banner.clear(); });
+    a.audioEl.addEventListener('seeked', () => { resetMusic(); previousTrackTime = a.audioEl.currentTime; });
+    a.audioEl.addEventListener('error', () => { statusEl.textContent = 'This track could not be played. Try another audio file.'; });
+  }
+  return a;
 }
 
-fileInput.addEventListener('change', () => {
-  const f = fileInput.files?.[0];
-  if (f) loadFile(f);
-});
+function resetMusic(): void {
+  Object.assign(dynamics, createDynamics());
+  Object.assign(beatClock, createBeatClock());
+  Object.assign(rhyme, createRhyme());
+  Object.assign(mood, createMood());
+  onsetTimes.length = 0;
+  getAudio()?.features.reset();
+  lastSeenDropCount = 0;
+  pendingLyric = null;
+  shownLyricIndex = -1;
+  director.reservedUntil = director.holdUntil = 0;
+  director.scheduledCue = -Infinity;
+  director.prevBuild = 0;
+  director.prevQuiet = true;
+  cameraSel.beatsAtChange = 0;
+  cameraSel.modeChangedAt = performance.now();
+  flock.runMax = 0.65;
+  previousTrackTime = getAudio()?.audioEl.currentTime ?? 0;
+  banner.clear();
+}
 
-// drag-and-drop audio onto the canvas
-canvas.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+function refreshSourceUi(): void {
+  const a = getAudio();
+  const file = a?.kind === 'file';
+  playBtn.disabled = !file;
+  element<HTMLButtonElement>('stop').disabled = !a?.currentSourceNode;
+  element('transport').hidden = !file;
+  element<HTMLButtonElement>('load-lrc').disabled = !file;
+  element<HTMLButtonElement>('clear-lrc').disabled = lyricLines.length === 0;
+  micBtn.classList.toggle('on', a?.kind === 'mic');
+  tabBtn.classList.toggle('on', a?.kind === 'tab');
+}
+
+function stopSource(): void {
+  sourceRequest++;
+  const a = getAudio();
+  if (a) { a.audioEl.pause(); disconnectCurrent(a, bpmHandle); resetBpm(bpmHandle); }
+  lyrics.stop(); trackAnalysis.cancel(); lyricLines = [];
+  resetMusic(); refreshSourceUi();
+  statusEl.textContent = 'Stopped · choose your next track';
+  revealInvite();
+}
+
+function loadFile(f: File): void {
+  const request = ++sourceRequest;
+  const a = audio();
+  lyrics.stop(); lyricLines = [];
+  loadAudioFile(a, bpmHandle, f);
+  resetMusic(); refreshSourceUi();
+  void trackAnalysis.load(f);
+  playBtn.textContent = 'Play';
+  statusEl.textContent = f.name;
+  dismissInvite();
+  // Both file picking and dropping are explicit playback gestures.
+  void a.ctx.resume().then(() => {
+    if (request === sourceRequest && a.kind === 'file') return a.audioEl.play();
+  }).catch(() => {
+    if (request === sourceRequest) statusEl.textContent = f.name + ' · press Play to begin';
+  });
+}
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files?.[0]; if (f) loadFile(f); fileInput.value = '';
 });
-canvas.addEventListener('drop', (e) => {
+element('load').addEventListener('click', () => fileInput.click());
+element('stop').addEventListener('click', stopSource);
+element('demo').addEventListener('click', () => loadFile(createDemoFile()));
+document.addEventListener('dragover', e => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; });
+document.addEventListener('drop', e => {
   e.preventDefault();
   const f = e.dataTransfer?.files?.[0];
-  if (f && (f.type.startsWith('audio/') || /\.(mp3|wav|ogg|flac|m4a|aac)$/i.test(f.name))) {
-    loadFile(f);
-  } else if (f) {
-    statusEl.textContent = `unsupported file type: ${f.type || f.name}`;
-  }
+  if (f && (f.type.startsWith('audio/') || /\.(mp3|wav|ogg|flac|m4a|aac)$/i.test(f.name))) loadFile(f);
+  else if (f) statusEl.textContent = 'Please choose an audio file';
 });
-
 playBtn.addEventListener('click', async () => {
-  const a = audio();
-  if (a.ctx.state === 'suspended') await a.ctx.resume();
-  if (a.audioEl.paused) {
-    await a.audioEl.play();
-    playBtn.textContent = 'pause';
-  } else {
-    a.audioEl.pause();
-    playBtn.textContent = 'play';
-  }
+  const a = audio(); if (a.kind !== 'file') return;
+  try {
+    if (a.audioEl.paused) { await a.ctx.resume(); await a.audioEl.play(); }
+    else { a.audioEl.pause(); banner.clear(); }
+  } catch { statusEl.textContent = 'Playback could not start. Try loading the track again.'; }
 });
 
-micBtn.addEventListener('click', async () => {
+async function capture(kind: 'mic' | 'tab'): Promise<void> {
+  const request = ++sourceRequest;
   try {
     const a = audio();
-    if (a.ctx.state === 'suspended') await a.ctx.resume();
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    });
-    attachStream(a, bpmHandle, stream);
-    ensureBpm(bpmHandle, a.ctx);
-    playBtn.disabled = true;
-    statusEl.textContent = 'mic live';
-    dismissInvite();
-    if (lyrics.enabled) lyrics.start();
-  } catch (e) {
-    statusEl.textContent = `mic blocked: ${(e as Error).message}`;
-  }
-});
-
-tabBtn.addEventListener('click', async () => {
-  try {
-    const a = audio();
-    if (a.ctx.state === 'suspended') await a.ctx.resume();
-    // getDisplayMedia requires video:true to be acceptable across browsers,
-    // even when we only want the audio track. We stop the video track
-    // immediately to avoid the encoded-frame overhead.
-    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-    stream.getVideoTracks().forEach((t) => t.stop());
-    if (stream.getAudioTracks().length === 0) {
-      stream.getTracks().forEach((t) => t.stop());
-      statusEl.textContent = 'no tab audio — tick "share tab audio" in the picker';
-      return;
+    await a.ctx.resume();
+    const stream = kind === 'mic'
+      ? await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } })
+      : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    if (request !== sourceRequest) { stream.getTracks().forEach(t => t.stop()); return; }
+    stream.getVideoTracks().forEach(t => t.stop());
+    if (!stream.getAudioTracks().length) {
+      stream.getTracks().forEach(t => t.stop());
+      statusEl.textContent = 'Select “Share tab audio” in the sharing window'; return;
     }
-    attachStream(a, bpmHandle, stream);
-    ensureBpm(bpmHandle, a.ctx);
-    playBtn.disabled = true;
-    statusEl.textContent = 'tab audio · source tab plays it';
-    dismissInvite();
-  } catch (e) {
-    statusEl.textContent = `tab audio failed: ${(e as Error).message}`;
+    lyrics.stop(); trackAnalysis.cancel(); lyricLines = [];
+    attachStream(a, bpmHandle, stream, kind);
+    stream.getAudioTracks().forEach(track => track.addEventListener('ended', () => { if (a.micStream === stream) stopSource(); }));
+    resetMusic(); refreshSourceUi(); dismissInvite();
+    statusEl.textContent = kind === 'mic' ? 'Microphone live' : 'Listening to tab audio';
+    if (kind === 'mic' && lyrics.enabled) lyrics.start();
+  } catch (error) {
+    if (request === sourceRequest) statusEl.textContent = `Audio capture unavailable: ${(error as Error).message}`;
   }
+}
+micBtn.addEventListener('click', () => { void capture('mic'); });
+tabBtn.addEventListener('click', () => { void capture('tab'); });
+document.querySelectorAll<HTMLButtonElement>('[data-source]').forEach(button => button.addEventListener('click', () => {
+  const action = button.dataset.source;
+  if (action === 'file') fileInput.click();
+  else if (action === 'demo') element<HTMLButtonElement>('demo').click();
+  else if (action === 'mic' || action === 'tab') void capture(action);
+}));
+element('load-lrc').addEventListener('click', () => element<HTMLInputElement>('lrc').click());
+element('clear-lrc').addEventListener('click', () => { lyricLines = []; shownLyricIndex = -1; banner.clear(); refreshSourceUi(); });
+element('lrc').addEventListener('change', async () => {
+  const input = element<HTMLInputElement>('lrc');
+  const file = input.files?.[0]; input.value = '';
+  const generation = getAudio()?.generation;
+  if (!file || file.size > 1024 * 1024) { statusEl.textContent = 'Choose a lyric file smaller than 1 MB'; return; }
+  try {
+    const lines = parseLrc(await file.text());
+    if (getAudio()?.kind !== 'file' || generation !== getAudio()?.generation) return;
+    lyricLines = lines; shownLyricIndex = -1; banner.clear(); refreshSourceUi();
+    statusEl.textContent = lines.length ? `Lyrics loaded · ${file.name}` : 'No timed lyrics found in this file';
+  } catch { statusEl.textContent = 'The lyric file could not be read'; }
+});
+element('seek').addEventListener('input', () => {
+  const a = getAudio(); if (a?.kind === 'file' && Number.isFinite(a.audioEl.duration)) a.audioEl.currentTime = Number(element<HTMLInputElement>('seek').value);
 });
 
 // ----- mouse orbit (subtle spring physics, used by preset modes) -----
 const orbit = createOrbit();
 attachOrbitInput(orbit, canvas);
-
-// auto-start mic on the first canvas click (user-gesture context for
-// getUserMedia + AudioContext.resume). Bypassed if a source is already
-// connected via file/mic button.
-let autoMicTried = false;
-canvas.addEventListener('click', () => {
-  if (autoMicTried || getAudio()?.currentSourceNode) return;
-  autoMicTried = true;
-  micBtn.click();
-});
 
 // ----- camera mode catalogue + music-driven director -----
 // Tracked camera modes exist for the first three ships only; the director
@@ -286,21 +356,17 @@ installKeyHandlers({
     if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => { /* ignore */ });
     else document.exitFullscreen();
   },
-  resetBpm: () => { resetBpm(bpmHandle); statusEl.textContent = 'bpm reset'; },
+  resetBpm: () => { resetBpm(bpmHandle); Object.assign(beatClock, createBeatClock()); onsetTimes.length = 0; statusEl.textContent = 'bpm reset'; },
   toggleNebula: () => {
     nebula.visible = !nebula.visible;
     statusEl.textContent = `nebula ${nebula.visible ? 'on' : 'off'}`;
   },
   cycleCamera: () => {
     applyCut(cameraSel, nextAvailableMode(cameraSel), bpmHandle.beatCount, CAM_BLEND_MANUAL_S);
+    director.pilotActiveUntil = performance.now() + 12000;
     statusEl.textContent = `cam: ${cameraSel.modes[cameraSel.currentIdx].label}`;
   },
-  toggleCinematic: () => {
-    director.cinematicAuto = !director.cinematicAuto;
-    cameraSel.modeChangedAt = performance.now();
-    cameraSel.beatsAtChange = bpmHandle.beatCount;
-    statusEl.textContent = `cinematic ${director.cinematicAuto ? 'on' : 'off'}`;
-  },
+  toggleCinematic: toggleAutomaticCamera,
   toggleStereo: () => setStereo(!stereo.enabled),
   toggleLyrics: () => setLyricsEnabled(!lyrics.enabled),
   nudgeEyeSep: (delta) => {
@@ -329,92 +395,85 @@ function onDrop(time: number) {
 }
 
 // ----- animation loop -----
-const clock = new THREE.Clock();
-// Ground flow: the landscape streams at `rowRate` rows per second (see
-// TERRAIN_ROW_RATE — fixed, or locked to the display's refresh rate at
-// startup), so the ships' cruise airspeed is a constant and a dropped
-// frame never slows the world. Whole rows shift when `rowAcc` passes 1;
-// the fraction slides the grid between shifts so motion stays continuous.
-let rowRate = TERRAIN_ROW_RATE > 0 ? TERRAIN_ROW_RATE : 60;
-let groundFlow = TERRAIN_ROW_SPACING * rowRate; // u/s
+const rowRate = TERRAIN_ROW_RATE;
+const groundFlow = TERRAIN_ROW_SPACING * rowRate;
 let rowAcc = 0;
-const rateCalibrator = TERRAIN_ROW_RATE > 0 ? null : createRateCalibrator();
-let rateLocked = TERRAIN_ROW_RATE > 0;
-function lockRowRate(hz: number): void {
-  rowRate = hz;
-  groundFlow = TERRAIN_ROW_SPACING * rowRate;
-  rateLocked = true;
-}
-let breath = 0;                               // smoothed beat envelope, 0..1
-// Smoothed frame timing for the status strip (ms).
-const timing = { cpuMs: 0, frameMs: 0 };
+let breath = 0; // smoothed beat envelope, 0..1
 
 // Per-frame input records, allocated once and rewritten each frame so the
 // loop creates no garbage for the collector to pause on.
 const flockInput: FlockInput = {
-  dt: 0, time: 0, level: 0, bassEnergy: 0, quiet: true, intensity: 0, hasAudio: false,
+  dt: 0, time: 0, level: 0, bassEnergy: 0, quiet: true, intensity: 0, hasAudio: false, anticipation: 0, release: 0,
 };
 const shipInput: ShipUpdateInput = {
   dt: 0, time: 0, groundFlow, level: 0, centroid: 0.5,
   bassEnergy: 0, beatPulse: 0, arrowKeys, anticipation: 0,
 };
 const cameraInput: CameraUpdateInput = {
-  bassEnergy: 0, intensity: 0, buildLevel: 0, dt: 0, time: 0, anticipation: 0,
+  bassEnergy: 0, intensity: 0, buildLevel: 0, dt: 0, time: 0, anticipation: 0, motion: preferences.motion,
   terrainHeightAt: (x, z) => bilerpHeight(terrain, x, z),
 };
 const SUN_AZIMUTH_LEN = Math.hypot(SUN_AZIMUTH_X, SUN_AZIMUTH_Z);
 
-function animate() {
-  // setAnimationLoop drives this externally — works for both rAF (2D) and
-  // the WebXR display vsync. Skip per-frame work when the tab is hidden in
-  // 2D mode; in XR the headset always wants frames, so don't skip there.
-  if (document.hidden && !renderer.xr.isPresenting) return;
-  const frameStart = performance.now();
-  // Clamp the step so a stall (tab switch, a long GC) advances the world
-  // by at most a tenth of a second instead of flinging everything.
-  const dt = Math.min(clock.getDelta(), 0.1);
-  const t = clock.getElapsedTime();
+const previousCameraPosition = camera.position.clone();
+const previousCameraQuaternion = camera.quaternion.clone();
+const currentCameraPosition = camera.position.clone();
+const currentCameraQuaternion = camera.quaternion.clone();
+let previousFov = camera.fov;
+function simulate(dt: number, t: number): void {
+  previousCameraPosition.copy(camera.position);
+  previousCameraQuaternion.copy(camera.quaternion);
+  previousFov = camera.fov;
   sceneTime = t;
   uniforms.uTime.value = t;
-  if (!rateLocked && rateCalibrator) {
-    const hz = rateCalibrator.push(dt);
-    if (hz) lockRowRate(hz);
-  }
-
   // Advance the flow: shift heights[] toward iy=0 (away from camera) by the
   // whole rows due this frame; slide the grid by the remaining fraction.
   rowAcc += dt * rowRate;
-  let shifts = Math.floor(rowAcc);
-  if (shifts > 4) { shifts = 4; rowAcc = 4; }
+  const shifts = Math.floor(rowAcc + 1e-9);
   rowAcc -= shifts;
-  if (shifts > 0) heights.copyWithin(0, COLS * shifts, ROWS * COLS);
+  shiftTerrainRows(terrain, shifts);
   setFlowOffset(terrain, rowAcc);
   const flowStep = groundFlow * dt; // u the landscape travelled −Z this frame
 
   // Audio: pull a fresh FFT and derive bass / level / centroid into the frame.
   const audioState = getAudio();
-  const audioSnap = extractAudio(audioState, frame);
+
   bassEnergy = frame.bassEnergy;
   const level = frame.level;
   const centroid = frame.centroid;
   const fftBins = audioSnap.fftBins;
 
-  // Dynamics: advance the EMAs + drop detector. When no source is attached,
-  // decay toward zero so transitions back to "idle" look smooth.
-  if (fftBins) {
-    if (updateDynamics(dynamics, audioSnap.peakLevel, dt)) {
-      // drop fired this frame — onDrop() runs further down once we know
-      // dropCount has advanced, since the same edge feeds the cinematic
-      // director's hard-cut path.
+  let onset = false;
+  while (onsetTimes.length && onsetTimes[0] <= audioTime) { onsetTimes.shift(); onset = true; }
+  const beatEdge = fftBins ? updateBeatClock(beatClock, audioTime, onset, bpmHandle.bpmCandidate || bpmHandle.bpm, dt) : false;
+  if (!fftBins) beatClock.pulse *= Math.exp(-9 * dt);
+  bpmHandle.beatPulse = beatClock.pulse;
+  bpmHandle.beatCount = beatClock.count;
+  const trackTime = audioState?.kind === 'file'
+    ? Math.max(0, audioState.audioEl.currentTime - (audioState.ctx.currentTime - audioTime)) : 0;
+  const cue = fftBins && audioState?.kind === 'file' ? upcomingCue(trackAnalysis.cues, trackTime) : undefined;
+  const forecast = cue ? Math.max(0, 1 - (cue.time - trackTime) / 8) * cue.confidence : 0;
+  // A known file cue owns its lead-in; individual attacks cannot spend that reveal early.
+  if (fftBins) updateDynamics(dynamics, audioSnap.peakLevel, dt, cue ? false : onset, forecast);
+  else decayDynamics(dynamics, dt);
+  if (fftBins && audioState?.kind === 'file' && trackTime >= previousTrackTime && trackTime - previousTrackTime < 0.5) {
+    const arrived = trackAnalysis.cues.find(c => c.confidence >= 0.65 && c.time > previousTrackTime && c.time <= trackTime);
+    if (arrived && dynamics.age * 1000 - dynamics.dropTime > 8000) releaseDynamics(dynamics, dynamics.age, arrived.confidence);
+  }
+  previousTrackTime = trackTime;
+  if (fftBins && lyricLines.length && audioState?.kind === 'file') {
+    const index = lyricAt(lyricLines, trackTime);
+    if (index !== shownLyricIndex) {
+      shownLyricIndex = index;
+      if (index >= 0 && trackTime - lyricLines[index].time < 8) banner.show(lyricLines[index].text);
+      else banner.clear();
     }
-  } else {
-    decayDynamics(dynamics);
   }
 
   // Front-row write — see scene/landscape.ts: folded spectrogram blended
   // with a band-driven synthesised landscape over a slow geology, meandering.
   writeLandscapeRow(landscape, terrain, heights, {
-    fftBins, dt, time: t, intensity: dynamics.intensity, centroid,
+    fftBins, dt, time: t, intensity: dynamics.intensity, centroid, sampleRate: audioState?.ctx.sampleRate ?? 44100,
   }, shifts);
 
   // copy heights → position attribute Y
@@ -436,16 +495,20 @@ function animate() {
 
   // global reactivity scalars derived from dynamics — used throughout the
   // remainder of the frame.
-  const sinceDrop = (performance.now() - dynamics.dropTime) / 1000;
+  const sinceDrop = (dynamics.age * 1000 - dynamics.dropTime) / 1000;
   const dropBoost = sinceDrop < 1.5 ? Math.exp(-sinceDrop * 2.0) : 0;
   const I = dynamics.intensity;
+
+  const breathRate = bpmHandle.beatPulse > breath ? TERRAIN_BREATH_ATTACK : TERRAIN_BREATH_RELEASE;
+  breath += (bpmHandle.beatPulse - breath) * (1 - Math.exp(-breathRate * dt));
+  uniforms.uHeightMul.value = 1.0 + breath * TERRAIN_BREATH_AMP * I;
 
   // Sparks off the crests: a few on every beat, scaled by intensity, a
   // burst on the drop, none in the hush. Vigour (launch spread and size)
   // follows intensity so a heavy section throws them higher and wider.
   sparks.update(t, groundFlow);
   if (fftBins && !dynamics.quiet) {
-    const beatEdge = bpmHandle.beatPulse > 0.9 && lastBeatPulse < 0.5;
+
     const vigour = Math.min(1.5, I);
     if (beatEdge) {
       const count = Math.round((SPARK_BEAT_BASE + SPARK_BEAT_PER_I * I) * (1 - mood.hush));
@@ -453,7 +516,6 @@ function animate() {
     }
     if (dropFiredThisFrame) sparks.emit(SPARK_DROP_BURST, t, uniforms.uSunColor.value, 1.5);
   }
-  lastBeatPulse = bpmHandle.beatPulse;
 
   // A drop, a peaking build, or the light returning after a hush releases a
   // waiting lyric to the sky; otherwise the fallback timer decides.
@@ -464,7 +526,7 @@ function animate() {
   lastHush = mood.hush;
 
   // The drop opens the lens for a couple of seconds — the pull-back reveal.
-  const targetFov = 55 + mood.afterglow * MOOD_FOV_AFTERGLOW;
+  const targetFov = 55 + mood.afterglow * MOOD_FOV_AFTERGLOW * preferences.motion;
   const newFov = camera.fov + (targetFov - camera.fov) * (1 - Math.exp(-5 * dt));
   if (Math.abs(camera.fov - newFov) > 0.001) {
     camera.fov = newFov;
@@ -483,8 +545,10 @@ function animate() {
   flockInput.dt = dt; flockInput.time = t; flockInput.level = level;
   flockInput.bassEnergy = bassEnergy; flockInput.quiet = dynamics.quiet;
   flockInput.intensity = I; flockInput.hasAudio = fftBins !== null;
+  flockInput.anticipation = mood.anticipation; flockInput.release = mood.afterglow;
   updateFlock(flock, ships, flockInput);
   cameraSel.presentShips = flock.present;
+  for (let i = 0; i < cameraSel.availableShips.length; i++) cameraSel.availableShips[i] = ships[i].phase !== 'dormant';
   // If the ship we were chasing has left, glide back to a calm shot.
   const chasedIdx = getTrackedShipIdx(cameraSel);
   if (chasedIdx >= 0 && ships[chasedIdx].phase === 'dormant') {
@@ -501,7 +565,7 @@ function animate() {
   for (let i = 0; i < ships.length; i++) {
     updateShip(ships[i], i, ships, formation, terrain, shipInput, i === trackedShipIdx);
   }
-  trails.update(ships, flowStep);
+  trails.update(ships, flowStep, dt);
 
   // Music-driven cinematic director — synchronises cuts to drops, builds,
   // quiet sections, and beat cadence. 'V' toggles, 'C' jumps regardless.
@@ -512,7 +576,10 @@ function animate() {
     dynamics,
     dropFiredThisFrame,
     beatCount: bpmHandle.beatCount,
-    bpm: bpmHandle.bpm,
+    bpm: beatClock.confidence >= 0.55 ? beatClock.bpm : 0,
+    beatConfidence: beatClock.confidence, beatEdge,
+    upcomingDropIn: cue ? cue.time - trackTime : Infinity,
+    upcomingCueAt: cue?.time ?? -Infinity, motion: preferences.motion,
     time: t,
     rhyme,
   });
@@ -521,10 +588,10 @@ function animate() {
   for (const s of ships) s.group.visible = true;
 
   // Orbit physics (consumed by preset modes); then dispatch on the active mode.
-  updateOrbitPhysics(orbit, bassEnergy, dt);
+  updateOrbitPhysics(orbit, bassEnergy * preferences.motion, dt);
   cameraInput.bassEnergy = bassEnergy; cameraInput.intensity = I;
   cameraInput.buildLevel = dynamics.build; cameraInput.dt = dt; cameraInput.time = t;
-  cameraInput.anticipation = mood.anticipation;
+  cameraInput.anticipation = mood.anticipation; cameraInput.motion = preferences.motion;
   updateCamera(camera, cameraSel, orbit, cameraRig, ships, cameraInput);
 
   // (sinceDrop and dropBoost computed earlier in this frame, see top of
@@ -534,9 +601,6 @@ function animate() {
   // attack/release envelope rather than the raw beat pulse (which steps to
   // 1 in a single frame and read as a jolt). Scaled by intensity so it's
   // flat on quiet sections and full-bodied during loud ones.
-  const breathRate = bpmHandle.beatPulse > breath ? TERRAIN_BREATH_ATTACK : TERRAIN_BREATH_RELEASE;
-  breath += (bpmHandle.beatPulse - breath) * (1 - Math.exp(-breathRate * dt));
-  uniforms.uHeightMul.value = 1.0 + breath * TERRAIN_BREATH_AMP * I;
   // aurora: phase sweeps slowly (faster on louder sections). A build
   // withholds it, the drop ignites the sky, the hush puts it out.
   uniforms.uAuroraPhase.value += (0.4 + I * 0.4) * dt;
@@ -559,11 +623,10 @@ function animate() {
   );
   uniforms.uSunColor.value.copy(SUN_EMBER).lerp(SUN_GOLD, sunArc);
   uniforms.uSun.value = (SUN_INTENSITY_MIN + (1 - SUN_INTENSITY_MIN) * sunArc) * (1 - SUN_HUSH_DIM * mood.hush);
-  sky.material.uniforms.uFlash.value = mood.flash;
+  sky.material.uniforms.uFlash.value = mood.flash * preferences.flash;
   // The dome rides with the camera so it is never clipped by the far plane
   // and every fragment's direction is exact.
   sky.mesh.position.copy(camera.position);
-  shipRenderer.update(ships, uniforms);
   // Distant range breathes with the song's long arc and dims with the hush.
   mountainEnvelope += (flock.energy - mountainEnvelope) * (1 - Math.exp(-dt / 4));
   // The range drifts past at a fraction of the ground flow — the planes fly
@@ -572,7 +635,7 @@ function animate() {
   mountains.update(mountainEnvelope, t, mountainScroll, breath);
   mountains.material.uniforms.uLift.value = 1 - 0.55 * mood.hush;
   // mirror world fades down when the scene is quiet
-  mirrorMaterial.uniforms.uOpacity.value = 0.10 * I * (1 - mood.hush);
+  mirrorMaterial.uniforms.uOpacity.value = 0.055 * I * (1 - mood.hush);
   // very subtle star parallax (independent of intensity — the cosmos doesn't
   // pause). Rates are per second (the old per-frame values at 60 fps).
   stars.rotation.y += 0.018 * dt;
@@ -592,38 +655,90 @@ function animate() {
 
   updatePostFx(pipeline, {
     intensity: I, bassEnergy, dropBoost, stereoEnabled: stereo.enabled,
-    anticipation: mood.anticipation, flash: mood.flash, hush: mood.hush,
+    anticipation: mood.anticipation, flash: mood.flash, hush: mood.hush, flashIntensity: preferences.flash,
   });
 
   // beat-dot pulse: validPeak event sets beatPulse=1; decay each frame.
-  bpmHandle.beatPulse *= Math.exp(-9 * dt); // visible for ~150ms after each peak
+  // The audio clock owns beat decay. // visible for ~150ms after each peak
   // The strip's readouts are DOM writes; skip them while it is hidden.
   if (!uiIdle) {
-    updateBpmReadout({ uiEl, bpmNumEl, bpmDotEl, dbgEl }, bpmHandle);
-    updateDebugPanel(dbgEl, dynamics, formation, dropBoost, flock, mood, t - rhyme.lastRecallAt < 4, timing);
+    bpmReadout.bpm = beatClock.confidence >= 0.55 ? beatClock.bpm : 0;
+    bpmReadout.bpmCandidate = bpmHandle.bpmCandidate;
+    bpmReadout.beatPulse = beatClock.pulse;
+    updateBpmReadout({ uiEl, bpmNumEl, bpmDotEl, dbgEl }, bpmReadout);
+    if (!dbgEl.hidden) updateDebugPanel(dbgEl, dynamics, formation, dropBoost, flock, mood, t - rhyme.lastRecallAt < 4, timing);
   }
   debugPanel.update(lyrics, lyricNote);
 
-  renderFrame(pipeline, scene, camera, dt);
-  timing.cpuMs += (performance.now() - frameStart - timing.cpuMs) * 0.05;
-  timing.frameMs += (dt * 1000 - timing.frameMs) * 0.05;
 }
-// Probe the display rate first (a few hundred ms of raw rAF intervals,
-// before any rendering can skew them), then start. A hidden tab yields
-// nothing; the loop then calibrates from its own first clean frames.
-if (rateLocked) {
-  renderer.setAnimationLoop(animate);
-} else {
-  measureRefreshRate().then((hz) => {
-    if (hz) lockRowRate(hz);
-    clock.getDelta(); // don't count the probe as the first frame's step
-    renderer.setAnimationLoop(animate);
-  });
+let lastFrameAt: number | null = null;
+let lastDpr = window.devicePixelRatio;
+let lastUiAt = 0;
+function animate(): void {
+  if (document.hidden && !renderer.xr.isPresenting) { lastFrameAt = null; return; }
+  const started = performance.now();
+  const elapsed = lastFrameAt === null ? SIMULATION_STEP : (started - lastFrameAt) / 1000;
+  if (lastFrameAt === null) { simulation.reset(); resetMusic(); }
+  lastFrameAt = started;
+  const a = getAudio();
+  audioSnap = extractAudio(a, frame);
+  audioTime = a ? presentationTime(a.ctx, a.kind === 'file', preferences.syncMs) : sceneTime;
+  if (audioSnap.onset && a) onsetTimes.push(a.ctx.currentTime);
+  const alpha = simulation.advance(elapsed, simulate);
+  currentCameraPosition.copy(camera.position); currentCameraQuaternion.copy(camera.quaternion);
+  const currentFov = camera.fov;
+  if (!renderer.xr.isPresenting) {
+    camera.position.lerpVectors(previousCameraPosition, currentCameraPosition, alpha);
+    camera.quaternion.slerpQuaternions(previousCameraQuaternion, currentCameraQuaternion, alpha);
+    camera.fov = previousFov + (currentFov - previousFov) * alpha;
+    camera.updateProjectionMatrix();
+  }
+  const visualTime = Math.max(0, sceneTime - SIMULATION_STEP + alpha * SIMULATION_STEP);
+  uniforms.uTime.value = visualTime;
+  setFlowOffset(terrain, rowAcc - (1 - alpha) * rowRate * SIMULATION_STEP);
+  trails.lines.position.z = (1 - alpha) * groundFlow * SIMULATION_STEP;
+  sky.mesh.position.copy(camera.position);
+  shipRenderer.update(ships, uniforms, alpha);
+  sparks.update(visualTime, groundFlow);
+  const quality = QUALITY_LEVELS[pipeline.quality.level];
+  uniforms.uDetail.value = quality.detail;
+  terrain.mirror.visible = quality.reflection;
+  const gpuMs = gpuTimer.poll();
+  if (gpuMs !== null) timing.gpuMs = gpuMs;
+  gpuTimer.begin();
+  renderFrame(pipeline, scene, camera, elapsed);
+  gpuTimer.end();
+  camera.position.copy(currentCameraPosition); camera.quaternion.copy(currentCameraQuaternion);
+  camera.fov = currentFov;
+  setFlowOffset(terrain, rowAcc);
+  timing.sample(performance.now() - started, elapsed * 1000, started);
+  if (!renderer.xr.isPresenting) {
+    const changed = preferences.quality === 'auto' && updateQuality(pipeline.quality,
+      timing.frameMs, Math.max(timing.cpuMs, timing.gpuMs ?? 0), elapsed);
+    if (changed || lastDpr !== window.devicePixelRatio) {
+      lastDpr = window.devicePixelRatio;
+      resizePipeline(pipeline, window.innerWidth, window.innerHeight);
+    }
+  }
+  if (started - lastUiAt > 200) {
+    lastUiAt = started;
+    syncControls();
+    if (a?.kind === 'file') {
+      const duration = Number.isFinite(a.audioEl.duration) ? a.audioEl.duration : 0;
+      const seek = element<HTMLInputElement>('seek');
+      seek.max = String(duration);
+      if (document.activeElement !== seek) seek.value = String(a.audioEl.currentTime);
+      element('elapsed').textContent = formatTime(a.audioEl.currentTime);
+      element('duration').textContent = formatTime(duration);
+    }
+  }
 }
+renderer.setAnimationLoop(animate);
 
 function setStereo(on: boolean) {
   stereo.enabled = on;
   stereoBtn.classList.toggle('on', on);
+  stereoBtn.setAttribute('aria-pressed', String(on));
   // Master camera aspect: stereo uses full canvas with internal 0.5 split,
   // so the master stays at canvas aspect either way — but we re-derive in
   // case the next frame is mono.
@@ -647,8 +762,81 @@ window.addEventListener('resize', () => {
   const h = window.innerHeight;
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
-  pipeline.composer.setSize(w, h);
-  // Match the BLOOM_DIVISOR-reduced bloom resolution.
-  pipeline.bloom.setSize(w / BLOOM_DIVISOR, h / BLOOM_DIVISOR);
+  if (!renderer.xr.isPresenting) resizePipeline(pipeline, w, h);
 });
+
+function formatTime(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+}
+const cameraControl = element<HTMLSelectElement>('camera');
+for (let i = 0; i < cameraSel.modes.length; i++) {
+  if (i === cameraSel.vrObserverIdx) continue;
+  const option = document.createElement('option'); option.value = String(i); option.textContent = cameraSel.modes[i].label;
+  cameraControl.appendChild(option);
+}
+cameraControl.addEventListener('change', () => {
+  applyCut(cameraSel, Number(cameraControl.value), bpmHandle.beatCount, CAM_BLEND_MANUAL_S);
+  director.pilotActiveUntil = performance.now() + 12000;
+});
+function toggleAutomaticCamera(): void {
+  if (preferences.motion < 0.05) {
+    preferences.motion = 0.35;
+    element<HTMLInputElement>('motion').value = '0.35';
+    savePreferences(preferences);
+    director.cinematicAuto = true;
+  } else director.cinematicAuto = !director.cinematicAuto;
+  director.reservedUntil = director.holdUntil = 0;
+  cameraSel.modeChangedAt = performance.now(); cameraSel.beatsAtChange = bpmHandle.beatCount;
+  syncControls();
+}
+element('director').addEventListener('click', toggleAutomaticCamera);
+element('fullscreen').addEventListener('click', () => {
+  if (document.fullscreenElement) void document.exitFullscreen();
+  else void document.documentElement.requestFullscreen().catch(() => { statusEl.textContent = 'Fullscreen is unavailable in this browser'; });
+});
+for (const key of ['motion', 'flash', 'sync'] as const) {
+  const input = element<HTMLInputElement>(key);
+  input.value = String(key === 'sync' ? preferences.syncMs : preferences[key]);
+  input.addEventListener('input', () => {
+    if (key === 'sync') preferences.syncMs = Number(input.value);
+    else preferences[key] = Number(input.value);
+    savePreferences(preferences); syncControls();
+  });
+}
+const qualityControl = element<HTMLSelectElement>('quality');
+qualityControl.value = preferences.quality;
+function applyQualityChoice() {
+  pipeline.quality.level = preferences.quality === 'low' ? 3 : 0;
+  pipeline.quality.slowFor = pipeline.quality.fastFor = 0;
+  pipeline.quality.cooldown = 3;
+  if (!renderer.xr.isPresenting) resizePipeline(pipeline, window.innerWidth, window.innerHeight);
+}
+qualityControl.addEventListener('change', () => {
+  preferences.quality = qualityControl.value as typeof preferences.quality;
+  savePreferences(preferences); applyQualityChoice();
+});
+element('diagnostics').addEventListener('change', () => { dbgEl.hidden = !element<HTMLInputElement>('diagnostics').checked; });
+function syncControls() {
+  if (element<HTMLDetailsElement>('settings').open) uiEl.style.setProperty('--ui-bottom', `${uiEl.getBoundingClientRect().bottom}px`);
+  cameraControl.value = String(cameraSel.currentIdx);
+  for (const option of cameraControl.options) {
+    const mode = cameraSel.modes[Number(option.value)];
+    option.disabled = (mode.kind === 'chase' || mode.kind === 'cockpit') && ships[mode.shipIdx].phase === 'dormant';
+  }
+  const auto = director.cinematicAuto && preferences.motion >= 0.05;
+  const button = element<HTMLButtonElement>('director');
+  const label = auto ? 'Automatic camera on' : 'Automatic camera off';
+  if (button.textContent !== label) button.textContent = label;
+  button.setAttribute('aria-pressed', String(auto));
+  element('sync-value').textContent = `${preferences.syncMs > 0 ? '+' : ''}${preferences.syncMs} ms`;
+}
+window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', event => {
+  if (event.matches) {
+    preferences.motion = preferences.flash = 0;
+    element<HTMLInputElement>('motion').value = element<HTMLInputElement>('flash').value = '0';
+    syncControls();
+  }
+});
+applyQualityChoice(); refreshSourceUi(); syncControls();
+
+canvas.addEventListener('webglcontextlost', () => { renderer.setAnimationLoop(null); stopSource(); });

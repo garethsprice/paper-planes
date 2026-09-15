@@ -34,7 +34,7 @@ export function updateMood(
 ): void {
   // Anticipation: the build signal, smoothed, gated off in quiet and cleared
   // the instant the drop lands so the release is a step.
-  const buildTarget = hasAudio && !d.quiet ? Math.min(1, d.build * 1.15) : 0;
+  const buildTarget = hasAudio && !d.quiet && d.phase === 'anticipate' ? Math.min(1, d.build * 1.15) : 0;
   if (dropFired) {
     mood.anticipation = 0;
     mood.flash = 1;

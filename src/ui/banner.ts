@@ -8,6 +8,7 @@ import { lyricsSettings } from '../audio/lyrics.ts';
 export type Banner = {
   el: HTMLDivElement;
   show: (text: string) => void;
+  clear: () => void;
   /** Seconds (performance.now-based) since the last show, or Infinity. */
   age: () => number;
 };
@@ -37,7 +38,11 @@ export function createBanner(): Banner {
     }, lyricsSettings.holdS * 1000);
   };
 
-  return { el, show, age: () => (performance.now() - shownAt) / 1000 };
+  const clear = () => {
+    if (hideTimer !== undefined) window.clearTimeout(hideTimer);
+    el.classList.remove('in'); el.classList.add('out'); el.textContent = ''; shownAt = -Infinity;
+  };
+  return { el, show, clear, age: () => (performance.now() - shownAt) / 1000 };
 }
 
 /** The "click anywhere to start the mic" invite (index.html `#invite`), set
@@ -47,7 +52,7 @@ export function createBanner(): Banner {
 export function revealInvite(): void {
   window.setTimeout(() => {
     const el = document.getElementById('invite');
-    if (el && !el.classList.contains('out')) el.classList.add('in');
+    if (el) { el.classList.remove('out', 'gone'); el.classList.add('in'); }
   }, 500);
 }
 
@@ -55,7 +60,7 @@ export function dismissInvite(): void {
   const el = document.getElementById('invite');
   if (!el || el.classList.contains('out')) return;
   el.classList.add('out');
-  el.addEventListener('transitionend', () => el.classList.add('gone'), { once: true });
+  el.addEventListener('transitionend', () => { if (el.classList.contains('out')) el.classList.add('gone'); }, { once: true });
   // If transitions are disabled (reduced motion), still remove it.
-  window.setTimeout(() => el.classList.add('gone'), 3000);
+  window.setTimeout(() => { if (el.classList.contains('out')) el.classList.add('gone'); }, 3000);
 }

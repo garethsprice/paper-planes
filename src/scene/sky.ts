@@ -44,6 +44,8 @@ const FRAG = /* glsl */ `
     col += uSunColor * band * gather * uSun * 0.22;
     col += uSunColor * (corona * uSun + disc * (1.0 * uSun + uFlash * 1.5));
     gl_FragColor = vec4(col, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 

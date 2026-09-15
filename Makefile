@@ -1,4 +1,4 @@
-.PHONY: install serve build preview clean
+.PHONY: install serve build test preview clean
 
 install:
 	npm install
@@ -10,7 +10,10 @@ serve:
 	npx vite --host 0.0.0.0 --port $$PORT --strictPort
 
 build:
-	npx vite build
+	npm run build
+
+test:
+	npm test
 
 preview:
 	npx vite preview --host 0.0.0.0

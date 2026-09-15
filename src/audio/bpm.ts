@@ -18,17 +18,19 @@ import { BPM_GAIN_FILE } from '../constants.ts';
 export type BpmHandle = {
   /** Resolved BPM analyser, populated lazily on first source attach. */
   analyzer: BpmAnalyzer | null;
+  connectionVersion: number;
+  pending: Promise<BpmAnalyzer | null> | null;
   filter: BiquadFilterNode | null;
   gain: GainNode | null;
   /** Locked tempo (0 until the analyser reports a stable estimate). */
   bpm: number;
   /** Current top candidate (early feedback before lock). */
   bpmCandidate: number;
-  /** Increments once per validPeak (gated to ~250 ms / 240 BPM ceiling). */
+  /** Presentation beat count, copied from the confidence-based beat clock. */
   beatCount: number;
-  /** 0..1, set to 1 on each peak; the animation loop decays it each frame. */
+  /** Presentation pulse, copied from the beat clock. */
   beatPulse: number;
-  /** Most recent peak timestamp (used for the 250 ms gate). */
+  /** Retained for compatibility with diagnostic consumers. */
   lastPeakAt: number;
   /** Last source connected to .gain — tracked so we can disconnect cleanly. */
   lastSourceNode: AudioNode | null;
@@ -36,7 +38,7 @@ export type BpmHandle = {
 
 export function createBpmHandle(): BpmHandle {
   return {
-    analyzer: null,
+    analyzer: null, connectionVersion: 0, pending: null,
     filter: null,
     gain: null,
     bpm: 0,
@@ -48,7 +50,7 @@ export function createBpmHandle(): BpmHandle {
   };
 }
 
-let promise: Promise<BpmAnalyzer | null> | null = null;
+
 
 /**
  * Lazily construct the BPM analyser worklet for this AudioContext. Idempotent.
@@ -57,12 +59,12 @@ let promise: Promise<BpmAnalyzer | null> | null = null;
  */
 export async function ensureBpm(handle: BpmHandle, ctx: AudioContext): Promise<BpmAnalyzer | null> {
   if (handle.analyzer) return handle.analyzer;
-  if (promise) return promise;
+  if (handle.pending) return handle.pending;
   handle.gain = ctx.createGain();
   handle.gain.gain.value = BPM_GAIN_FILE;
   handle.filter = getBiquadFilter(ctx);
   handle.gain.connect(handle.filter);
-  promise = createRealtimeBpmAnalyzer(ctx, { continuousAnalysis: false, debug: true })
+  handle.pending = createRealtimeBpmAnalyzer(ctx, { continuousAnalysis: true, debug: false })
     .then((a) => {
       handle.filter!.connect(a.node);
       // The worklet only reads inputs; outputs are silent. Connect to
@@ -75,27 +77,18 @@ export async function ensureBpm(handle: BpmHandle, ctx: AudioContext): Promise<B
       });
       a.on('bpmStable', (data) => {
         const top = data.bpm[0];
-        if (top) handle.bpm = top.tempo; // snap; we lock once
+        if (top) handle.bpm = top.tempo; // tempo candidate; beatClock owns confidence and phase
       });
       a.on('error', (e) => console.error('[bpm] analyzer error:', e));
-      a.on('validPeak', () => {
-        // The analyser descends through thresholds (0.95 → 0.2) and may emit
-        // multiple validPeak events per audio peak. Gate to 250 ms.
-        const now = performance.now();
-        if (now - handle.lastPeakAt > 250) {
-          handle.beatPulse = 1.0;
-          handle.lastPeakAt = now;
-          handle.beatCount++;
-        }
-      });
       handle.analyzer = a;
       return a;
     })
     .catch((err) => {
       console.warn('[bpm] analyzer unavailable:', err);
+      handle.pending = null;
       return null;
     });
-  return promise;
+  return handle.pending;
 }
 
 /** Wire a fresh source (file/mic/tab) into the analyser at the given gain. */
@@ -105,8 +98,10 @@ export function connectBpmSource(
   src: AudioNode,
   gain: number,
 ): void {
+  const version = ++handle.connectionVersion;
+  resetBpm(handle);
   ensureBpm(handle, ctx).then((a) => {
-    if (!a || !handle.gain) return;
+    if (!a || !handle.gain || version !== handle.connectionVersion) return;
     if (handle.lastSourceNode) {
       try { handle.lastSourceNode.disconnect(handle.gain); } catch { /* ignore */ }
     }
@@ -124,5 +119,8 @@ export function connectBpmSource(
 export function resetBpm(handle: BpmHandle): void {
   handle.bpm = 0;
   handle.bpmCandidate = 0;
+  handle.beatCount = 0;
+  handle.beatPulse = 0;
+  handle.lastPeakAt = 0;
   handle.analyzer?.reset();
 }
